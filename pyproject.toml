@@ -17,6 +17,9 @@ dependencies = [
     "mapclassify",
     "boto3",
     "tqdm",
+    "xarray",
+    "netcdf4",
+    "ipympl",
 ]
 
 [project.optional-dependencies]

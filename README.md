@@ -10,7 +10,8 @@ flood-prediction/
 │   ├── raw/          # ground truth flood event records (parquet)
 │   └── goes/         # downloaded GOES satellite imagery (NetCDF)
 ├── notebooks/
-│   └── explore.ipynb # exploratory analysis of ground truth data
+│   ├── explore.ipynb      # exploratory analysis of ground truth data
+│   └── preview_goes.ipynb # interactive viewer for downloaded GOES imagery
 ├── src/
 │   └── goes_data.py  # GOES download script (CLI + importable module)
 ├── pyproject.toml
@@ -95,14 +96,17 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 
 ## Notebooks
 
+Launch with `uv run jupyter lab`. The GOES viewer uses the `ipympl` widget backend (in deps) for interactive zoom.
+
 | Notebook | Description |
 |---|---|
 | [notebooks/explore.ipynb](notebooks/explore.ipynb) | Exploratory analysis of ground truth flood event data: spatial distribution, temporal coverage, area statistics |
+| [notebooks/preview_goes.ipynb](notebooks/preview_goes.ipynb) | Interactive viewer for downloaded GOES imagery: pick a date/file, view any band or a true-color RGB at native 2 km resolution, crop to a lon/lat or pixel box, live pan/zoom |
 
 ## Band Reference
 
 | Use case | Bands |
 |---|---|
-| GeoColor (true color) | 3, 2, 1 |
+| True color (RGB = R, G, B) | 2, 3, 1 |
 | Cloud properties | 6 |
 | All bands | 1–16 (all in each ABI-L2-MCMIPC file) |
