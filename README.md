@@ -7,8 +7,8 @@ A research project that uses GOES-16 and GOES-19 satellite imagery (ABI-L2-MCMIP
 ```
 flood-prediction/
 ├── data/
-│   ├── raw/          # ground truth flood event records (parquet)
-│   └── goes/         # downloaded GOES satellite imagery (NetCDF)
+│   └── raw/          # ground truth flood event records (parquet)
+│                     # GOES imagery (NetCDF) downloads to /mnt/disk1/goes-data/
 ├── notebooks/
 │   ├── explore.ipynb      # exploratory analysis of ground truth data
 │   └── preview_goes.ipynb # interactive viewer for downloaded GOES imagery
@@ -78,7 +78,7 @@ Storage               676.1G     115.3G     791.4G
 # Dry-run: list every file and report the EXACT total size (no fetching)
 uv run python src/goes_data.py download --dry-run
 
-# Full download (2020–2026-02-28, 1 image/day at 18:00 UTC)
+# Full download — default: 6 daytime images/day (16-21 UTC) -> /mnt/disk1/goes-data
 uv run python src/goes_data.py download
 
 # Custom date range or hour
@@ -86,11 +86,11 @@ uv run python src/goes_data.py download \
   --start-date 2023-01-01 --end-date 2023-12-31 \
   --workers 32
 
-# 6 images/day (daytime hours)
-uv run python src/goes_data.py download --hour 13 15 17 18 19 21
+# 1 image/day, or a custom location (override the 6/day + path defaults)
+uv run python src/goes_data.py download --hour 18 --data-dir /some/other/path
 ```
 
-Downloads are resumable — already-downloaded files are skipped automatically. Files are saved to `data/goes/GOES{16|19}/YYYY/MM/DD/`.
+Downloads are resumable — already-downloaded files are skipped automatically. Files are saved to `/mnt/disk1/goes-data/GOES{16|19}/YYYY/MM/DD/` by default (override with `--data-dir`).
 
 > **Tip:** `--dry-run` reports the **exact** total download size, summed from real S3 object sizes (nothing is fetched). Use it when you need an accurate figure; `estimate` is a faster rough projection at ~60 MB/file.
 

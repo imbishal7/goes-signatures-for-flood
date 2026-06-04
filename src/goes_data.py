@@ -42,14 +42,14 @@ PRODUCT = "ABI-L2-MCMIPC"
 GOES16_END_DATE = date(2025, 4, 6)
 GOES19_START_DATE = date(2025, 4, 7)
 
-TARGET_UTC_HOUR = 18          # 18:00 UTC ≈ noon Central
+# 6 daytime images/day, centered on CONUS solar noon (~18-19 UTC) for max daylight
+DEFAULT_TARGET_HOURS = [16, 17, 18, 19, 20, 21]
 TYPICAL_FILE_SIZE_MB = 60.0   # verified: 57–61 MB per file
 
-DEFAULT_START = date(2020, 1, 1)
-# month-end of the flood dataset's last event (2026-02-03)
+DEFAULT_START = date(2019, 1, 1)
 DEFAULT_END = date(2026, 2, 28)
-DEFAULT_DATA_DIR = Path("data/goes")
-DEFAULT_WORKERS = 32           # saturates 100 MB/s with ~60 MB files
+DEFAULT_DATA_DIR = Path("/mnt/disk1/goes-data")
+DEFAULT_WORKERS = 25           # saturates 100 MB/s with ~60 MB files
 
 
 # ---------------------------------------------------------------------------
@@ -347,13 +347,13 @@ def download_date_range(
 
     Uses GOES-16 through 2025-04-06, GOES-19 from 2025-04-07 onward.
     Skips already-downloaded files (idempotent re-runs).
-    To download 6 images/day, pass target_hours=[13, 15, 17, 18, 19, 21].
+    Defaults to 6 daytime images/day; pass target_hours=[18] for a single image.
     Workers run in threads — boto3 clients are thread-safe.
     With dry_run=True, nothing is fetched; it lists every file and reports the
     exact total download size from real S3 object sizes.
     """
     if target_hours is None:
-        target_hours = [TARGET_UTC_HOUR]
+        target_hours = DEFAULT_TARGET_HOURS
 
     # Build the full task list upfront so tqdm can show accurate totals
     tasks: list[tuple[date, int]] = []
@@ -441,10 +441,10 @@ def parse_args() -> argparse.Namespace:
         help=f"Root directory for downloads (default: {DEFAULT_DATA_DIR})",
     )
     dl.add_argument(
-        "--hour", type=int, nargs="+", default=[TARGET_UTC_HOUR], metavar="H",
+        "--hour", type=int, nargs="+", default=DEFAULT_TARGET_HOURS, metavar="H",
         help=(
-            f"UTC hour(s) to target (default: {TARGET_UTC_HOUR}). "
-            "Pass multiple for 6-image/day mode, e.g. --hour 13 15 17 18 19 21"
+            f"UTC hour(s) to target (default: {DEFAULT_TARGET_HOURS}, "
+            "6 daytime images/day). Pass one for 1/day, e.g. --hour 18"
         ),
     )
     dl.add_argument(
