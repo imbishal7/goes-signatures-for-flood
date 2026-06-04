@@ -74,7 +74,7 @@ Storage               676.1G     115.3G     791.4G
 #### Download
 
 ```bash
-# Dry-run: see what would be downloaded without fetching anything
+# Dry-run: list every file and report the EXACT total size (no fetching)
 uv run python src/goes_data.py download --dry-run
 
 # Full download (2020–2026-02-28, 1 image/day at 18:00 UTC)
@@ -90,6 +90,8 @@ uv run python src/goes_data.py download --hour 13 15 17 18 19 21
 ```
 
 Downloads are resumable — already-downloaded files are skipped automatically. Files are saved to `data/goes/GOES{16|19}/YYYY/MM/DD/`.
+
+> **Tip:** `--dry-run` reports the **exact** total download size, summed from real S3 object sizes (nothing is fetched). Use it when you need an accurate figure; `estimate` is a faster rough projection at ~60 MB/file.
 
 ## Notebooks
 

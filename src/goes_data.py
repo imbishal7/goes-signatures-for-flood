@@ -280,10 +280,13 @@ def _download_task(
     base_dir: Path,
     dry_run: bool,
     verbose: bool,
-) -> str:
+) -> tuple[str, int]:
     """
-    Resolve and download one (date, hour) slot. Returns one of:
-    'downloaded', 'skipped_existing', 'skipped_no_data', 'error:<msg>'.
+    Resolve and download one (date, hour) slot.
+
+    Returns (status, size_bytes). status is one of 'downloaded', 'dry_run',
+    'skipped_existing', 'skipped_no_data', or 'error:<msg>'. size_bytes is the
+    chosen file's real S3 size for 'downloaded'/'dry_run', else 0.
     """
     satellite_key = select_satellite(dt)
     bucket = SATELLITES[satellite_key]
@@ -296,7 +299,7 @@ def _download_task(
         f"OR_ABI-L2-MCMIPC-M6_{sat_code}_s{dt.year}{doy:03d}{hour:02d}*.nc"
     ))
     if existing:
-        return "skipped_existing"
+        return "skipped_existing", 0
 
     s3 = _get_thread_s3_client()
     files = list_files(s3, satellite_key, dt, hour)
@@ -305,7 +308,7 @@ def _download_task(
     if chosen is None:
         if verbose:
             tqdm.write(f"  [no data] {dt} {satellite_key} hour={hour:02d}")
-        return "skipped_no_data"
+        return "skipped_no_data", 0
 
     filename = os.path.basename(chosen["key"])
     local_path = build_local_path(base_dir, satellite_key, dt, filename)
@@ -316,14 +319,14 @@ def _download_task(
             f"[DRY-RUN] s3://{bucket}/{chosen['key']}  ({size_mb:.1f} MB)"
             f"  → {local_path}"
         )
-        return "dry_run"
+        return "dry_run", chosen["size"]
 
     try:
         download_file(s3, bucket, chosen["key"], local_path, show_progress=False)
-        return "downloaded"
+        return "downloaded", chosen["size"]
     except Exception as exc:
         tqdm.write(f"  [error] {dt} {satellite_key} hour={hour:02d}: {exc}")
-        return f"error:{exc}"
+        return f"error:{exc}", 0
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +349,8 @@ def download_date_range(
     Skips already-downloaded files (idempotent re-runs).
     To download 6 images/day, pass target_hours=[13, 15, 17, 18, 19, 21].
     Workers run in threads — boto3 clients are thread-safe.
+    With dry_run=True, nothing is fetched; it lists every file and reports the
+    exact total download size from real S3 object sizes.
     """
     if target_hours is None:
         target_hours = [TARGET_UTC_HOUR]
@@ -359,8 +364,10 @@ def download_date_range(
         current += timedelta(days=1)
 
     stats: dict[str, int] = {
-        "downloaded": 0, "skipped_existing": 0, "skipped_no_data": 0, "errors": 0
+        "downloaded": 0, "skipped_existing": 0,
+        "skipped_no_data": 0, "errors": 0, "dry_run": 0,
     }
+    total_bytes = 0
     stats_lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -372,10 +379,14 @@ def download_date_range(
         }
         with tqdm(total=len(futures), desc="Files", unit="file") as bar:
             for future in as_completed(futures):
-                result = future.result()
+                result, size = future.result()
                 with stats_lock:
                     if result == "downloaded":
                         stats["downloaded"] += 1
+                        total_bytes += size
+                    elif result == "dry_run":
+                        stats["dry_run"] += 1
+                        total_bytes += size
                     elif result == "skipped_existing":
                         stats["skipped_existing"] += 1
                     elif result == "skipped_no_data":
@@ -384,13 +395,24 @@ def download_date_range(
                         stats["errors"] += 1
                 bar.update(1)
 
+    stats["total_bytes"] = total_bytes
+
     if verbose:
-        print(
-            f"\nDone. downloaded={stats['downloaded']}  "
-            f"skipped_existing={stats['skipped_existing']}  "
-            f"skipped_no_data={stats['skipped_no_data']}  "
-            f"errors={stats['errors']}"
-        )
+        if dry_run:
+            gb = total_bytes / 1024 ** 3
+            print(
+                f"\n[DRY-RUN] would download {stats['dry_run']:,} files"
+                f" = {total_bytes:,} bytes ({gb:.2f} GB, exact)."
+                f"  skipped_existing={stats['skipped_existing']}"
+                f"  skipped_no_data={stats['skipped_no_data']}"
+            )
+        else:
+            print(
+                f"\nDone. downloaded={stats['downloaded']}  "
+                f"skipped_existing={stats['skipped_existing']}  "
+                f"skipped_no_data={stats['skipped_no_data']}  "
+                f"errors={stats['errors']}"
+            )
     return stats
 
 
