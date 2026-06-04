@@ -1,7 +1,7 @@
 [project]
-name = "flood-prediction"
+name = "goes-signatures-flood"
 version = "0.1.0"
-description = "Flood prediction ML project"
+description = "GOES-16/19 spectral signatures for flood event detection across CONUS"
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
@@ -15,6 +15,8 @@ dependencies = [
     "geopandas",
     "folium",
     "mapclassify",
+    "boto3",
+    "tqdm",
 ]
 
 [project.optional-dependencies]

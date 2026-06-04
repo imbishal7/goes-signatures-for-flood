@@ -27,6 +27,10 @@ build/
 *.npy
 *.npz
 
+# Downloaded GOES imagery — ignore the entire download tree, keep only the placeholder
+data/goes/*
+!data/goes/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db
