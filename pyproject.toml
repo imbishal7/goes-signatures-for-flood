@@ -1,0 +1,30 @@
+[project]
+name = "flood-prediction"
+version = "0.1.0"
+description = "Flood prediction ML project"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "matplotlib",
+    "seaborn",
+    "jupyter",
+    "ipykernel",
+    "pyarrow",
+    "geopandas",
+    "folium",
+    "mapclassify",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

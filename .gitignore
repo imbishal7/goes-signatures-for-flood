@@ -1,0 +1,39 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# uv
+.uv/
+
+# Data files (large/generated)
+*.parquet
+*.csv
+*.nc
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
