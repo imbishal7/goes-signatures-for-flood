@@ -19,7 +19,8 @@ dependencies = [
     "tqdm",
     "xarray",
     "netcdf4",
-    "ipympl",
+    "rioxarray",
+    "rasterio",
 ]
 
 [project.optional-dependencies]

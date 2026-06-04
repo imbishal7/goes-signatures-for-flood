@@ -96,12 +96,12 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 
 ## Notebooks
 
-Launch with `uv run jupyter lab`. The GOES viewer uses the `ipympl` widget backend (in deps) for interactive zoom.
+Launch with `uv run jupyter lab`.
 
 | Notebook | Description |
 |---|---|
 | [notebooks/explore.ipynb](notebooks/explore.ipynb) | Exploratory analysis of ground truth flood event data: spatial distribution, temporal coverage, area statistics |
-| [notebooks/preview_goes.ipynb](notebooks/preview_goes.ipynb) | Interactive viewer for downloaded GOES imagery: pick a date/file, view any band or a true-color RGB at native 2 km resolution, crop to a lon/lat or pixel box, live pan/zoom |
+| [notebooks/preview_goes.ipynb](notebooks/preview_goes.ipynb) | Preview downloaded GOES imagery: pick a date/file, view any band or a true-color RGB, then overlay it on an interactive folium map (scroll-zoom/pan, switchable basemaps) reprojected to lat/lon; crop to a lon/lat or pixel box; plus quick static previews |
 
 ## Band Reference
 
