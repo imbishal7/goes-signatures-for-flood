@@ -26,6 +26,25 @@ Requires Python ≥ 3.11 and [uv](https://github.com/astral-sh/uv).
 uv sync
 ```
 
+### GPU / ML stack
+
+This project targets a CUDA GPU workstation (developed on 2× NVIDIA RTX PRO 6000
+Blackwell). `uv sync` installs the GPU/ML stack — **PyTorch (CUDA 12.8 wheels),
+Lightning, CuPy**, plus `timm`, `einops`, `xbatcher`, and `tensorboard`. The cu128
+wheels are required for Blackwell (sm_120) GPUs; the PyTorch index is pinned in
+`pyproject.toml`. Both GPUs are usable for data-parallel (DDP) training.
+
+RAPIDS (GPU dataframes + spatial + ML) is installed separately — it can't be locked
+cleanly and pins numpy down:
+
+```bash
+.venv/bin/python -m pip install --extra-index-url=https://pypi.nvidia.com \
+    "cudf-cu12==25.4.*" "cuspatial-cu12==25.4.*" "cuml-cu12==25.4.*"
+```
+
+> A plain `uv sync` drops this overlay and bumps numpy back; re-run the line above
+> afterward, or use `uv sync --inexact`. See [CLAUDE.md](CLAUDE.md) for full details.
+
 ## Data
 
 ### Ground Truth Flood Events

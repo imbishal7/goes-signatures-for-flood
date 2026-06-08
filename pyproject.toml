@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "GOES-16/19 spectral signatures for flood event detection across CONUS"
 requires-python = ">=3.11"
 dependencies = [
+    # --- data / geo / IO ---
     "numpy",
     "pandas",
     "scikit-learn",
@@ -21,6 +22,15 @@ dependencies = [
     "netcdf4",
     "rioxarray",
     "rasterio",
+    # --- GPU / ML stack (Blackwell sm_120; CUDA 12.8 wheels) ---
+    "torch>=2.7",
+    "torchvision>=0.22",
+    "lightning>=2.4",      # multi-GPU (DDP) training across both RTX PRO 6000s
+    "cupy-cuda12x>=13.4",  # GPU NumPy (CUDA 12.x runtime, matches torch cu128)
+    "timm>=1.0",           # pretrained vision backbones
+    "einops",              # tensor reshaping for vision / remote-sensing models
+    "xbatcher",            # stream xarray (GOES NetCDF) into ML batches
+    "tensorboard",         # training metrics / logging
 ]
 
 [project.optional-dependencies]
@@ -28,6 +38,25 @@ dev = [
     "ruff",
     "pytest",
 ]
+
+# RAPIDS (GPU dataframes + spatial + classical ML) is NOT locked here: its
+# NVIDIA-index wheels + pre-release transitive deps don't resolve through uv's
+# universal locker, and it pins numpy/pandas/pyarrow down. Install as an overlay
+# with pip (pinned to 25.4 — cuSpatial's newest cp312 wheel; cuDF/cuML must match):
+#   .venv/bin/python -m pip install --extra-index-url=https://pypi.nvidia.com \
+#       "cudf-cu12==25.4.*" "cuspatial-cu12==25.4.*" "cuml-cu12==25.4.*"
+# NOTE: a plain `uv sync` reconciles to the lock and will drop this overlay /
+# bump numpy back — re-run the line above afterward, or use `uv sync --inexact`.
+
+# Pull torch/torchvision from the CUDA 12.8 (Blackwell) wheel index.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 [tool.ruff]
 line-length = 88
