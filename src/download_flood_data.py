@@ -24,10 +24,10 @@ A single VTEC event can appear in several states' lists (its polygon crosses
 state lines), so events are de-duplicated by (year, wfo, phenomena, etn) and the
 per-state metadata is merged.
 
-Output: a GeoParquet (and/or CSV with WKT geometry) of every unique warning with
-its polygon — a flood ground-truth layer to pair with the GOES imagery. Written
-under the repo's data/ dir. Runs are resumable: the event list and each fetched
-polygon are cached, so re-running only fetches what is missing.
+Output: a GeoParquet of every unique warning with its polygon — a flood
+ground-truth layer to pair with the GOES imagery. Written under the repo's data/
+dir. Runs are resumable: the event list and each fetched polygon are cached, so
+re-running only fetches what is missing.
 
 This script also fetches the companion *groundsource* flood-extent dataset from
 Zenodo (the ``groundsource`` subcommand) so the full flood ground truth can be
@@ -292,20 +292,12 @@ def build_geodataframe(
     return gdf.sort_values(["issue", "wfo", "eventid"]).reset_index(drop=True)
 
 
-def write_outputs(gdf: gpd.GeoDataFrame, out_dir: Path, fmt: str) -> None:
-    """Write the dataset as GeoParquet and/or CSV (geometry as WKT)."""
+def write_outputs(gdf: gpd.GeoDataFrame, out_dir: Path) -> None:
+    """Write the warnings dataset as a single GeoParquet."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = "flood_warnings_conus"
-    if fmt in ("parquet", "both"):
-        p = out_dir / f"{stem}.parquet"
-        gdf.to_parquet(p)
-        print(f"wrote {p}  ({len(gdf):,} rows)")
-    if fmt in ("csv", "both"):
-        c = out_dir / f"{stem}.csv"
-        df = gdf.copy()
-        df["geometry_wkt"] = df.geometry.apply(lambda g: g.wkt if g else "")
-        df.drop(columns="geometry").to_csv(c, index=False)
-        print(f"wrote {c}  ({len(df):,} rows)")
+    p = out_dir / "flood_warnings_conus.parquet"
+    gdf.to_parquet(p)
+    print(f"wrote {p}  ({len(gdf):,} rows)")
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +311,6 @@ def run(
     phenomena: list[str] | None = None,
     out_dir: Path = DEFAULT_OUT_DIR,
     workers: int = DEFAULT_WORKERS,
-    fmt: str = "both",
 ) -> gpd.GeoDataFrame:
     """Pull all FF/FA warnings for the year range and write the dataset."""
     years = list(range(start_year, end_year + 1))
@@ -337,7 +328,7 @@ def run(
     by_ph = gdf.phenomena.value_counts().to_dict()
     print(f"\n{len(gdf):,} unique warnings  |  with polygon: {n_poly:,}  "
           f"|  by phenomena: {by_ph}")
-    write_outputs(gdf, out_dir, fmt)
+    write_outputs(gdf, out_dir)
     return gdf
 
 
@@ -409,7 +400,6 @@ def parse_args() -> argparse.Namespace:
     )
     w.add_argument("--out", default=str(DEFAULT_OUT_DIR), metavar="DIR")
     w.add_argument("--workers", type=int, default=DEFAULT_WORKERS, metavar="N")
-    w.add_argument("--format", default="both", choices=["parquet", "csv", "both"])
 
     # -- groundsource subcommand (Zenodo download) ---------------------------
     g = sub.add_parser(
@@ -437,7 +427,6 @@ def main() -> None:
             phenomena=args.phenomena,
             out_dir=Path(args.out),
             workers=args.workers,
-            fmt=args.format,
         )
     elif args.command == "groundsource":
         download_groundsource(dest=Path(args.dest), force=args.force)

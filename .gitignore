@@ -26,6 +26,10 @@ build/
 *.hdf5
 *.npy
 *.npz
+*.jsonl
+
+# ...but track the single unified flood ground-truth parquet (small enough for GitHub)
+!data/flood_warnings/floods_unified.parquet
 
 # OS
 .DS_Store

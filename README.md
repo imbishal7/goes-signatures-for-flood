@@ -2,13 +2,22 @@
 
 A research project that uses GOES-16 and GOES-19 satellite imagery (ABI-L2-MCMIPC) to identify spectral signatures associated with flood events across the contiguous United States (CONUS).
 
+> **Status: early research — the prediction target is not finalized.** The current
+> focus is exploratory: watching a day's GOES cloud time-lapse over CONUS against the
+> *next day's* flood polygons on one interactive map, to see whether cloud and
+> moisture movement lines up with where extreme flooding appears. Two flood
+> ground-truth layers back this up — observed flood extents (**groundsource**) and
+> NWS flood **warnings** (flash-flood + areal-flood) — merged into a single unified
+> parquet.
+
 ## Project Structure
 
 ```
 flood-prediction/
 ├── data/
-│   └── raw/          # ground truth flood event records (parquet)
-│                     # GOES imagery (NetCDF) downloads to /mnt/disk1/goes-data/
+│   ├── raw/                # groundsource flood-extent parquet (downloaded, gitignored)
+│   └── flood_warnings/     # floods_unified.parquet (committed) + build intermediates
+│                           # GOES imagery (NetCDF) downloads to /mnt/disk1/goes-data/
 ├── notebooks/
 │   ├── explore_flood_data.ipynb  # load/summarize groundsource + warnings; unified frame
 │   ├── clouds_vs_floods.ipynb    # GOES time-lapse + 25km grid + next-day flood overlay
@@ -49,14 +58,25 @@ cleanly and pins numpy down:
 
 ## Data
 
-### Ground Truth Flood Events
+### Flood ground truth
 
-Download the flood event records and place them in `data/raw/`:
+Two complementary flood layers, both fetched via `src/download_flood_data.py`:
 
 ```bash
-wget -O data/raw/groundsource_2026.parquet \
-  "https://zenodo.org/records/18647054/files/groundsource_2026.parquet?download=1"
+# groundsource flood-extent polygons (~637 MB) from Zenodo -> data/raw/
+uv run python src/download_flood_data.py groundsource
+
+# NWS Flash Flood + Areal Flood warning polygons (CONUS, 2019-2026) from IEM
+# -> data/flood_warnings/flood_warnings_conus.parquet
+uv run python src/download_flood_data.py warnings
 ```
+
+Both are idempotent/resumable: `warnings` caches each fetched polygon so re-runs
+only fetch what's missing, and `groundsource` skips if the file is already present
+(`--force` to re-download). `explore_flood_data.ipynb` merges the two into the
+**unified** layer at `data/flood_warnings/floods_unified.parquet` — the one flood
+artifact committed to the repo, so you can use it directly without re-downloading or
+rebuilding.
 
 ### GOES Satellite Imagery
 
@@ -115,23 +135,15 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 
 > **Tip:** `--dry-run` reports the **exact** total download size, summed from real S3 object sizes (nothing is fetched). Use it when you need an accurate figure; `estimate` is a faster rough projection at ~60 MB/file.
 
-## Flood ground truth
+## Workflow
 
-Two complementary flood layers, both fetched via `src/download_flood_data.py`:
-
-```bash
-# groundsource flood-extent polygons (~637 MB) from Zenodo -> data/raw/
-uv run python src/download_flood_data.py groundsource
-
-# NWS Flash Flood + Areal Flood warning polygons (CONUS, 2019-2026) from IEM
-# -> data/flood_warnings/flood_warnings_conus.{parquet,csv}
-uv run python src/download_flood_data.py warnings
-```
-
-Both are idempotent/resumable. The `warnings` pull caches each fetched polygon, so
-re-runs only fetch what's missing; `groundsource` skips if the file is already
-present (use `--force` to re-download). `explore_flood_data.ipynb` then merges them
-into the unified frame the `clouds_vs_floods.ipynb` overlay reads.
+1. **Flood ground truth** — `download_flood_data.py groundsource` + `warnings`, or
+   just use the committed `data/flood_warnings/floods_unified.parquet`.
+2. **GOES imagery** — `download_goes.py download` for the dates of interest.
+3. **Explore** — `explore_flood_data.ipynb` summarizes both layers and (re)builds the
+   unified parquet.
+4. **Compare** — `clouds_vs_floods.ipynb` overlays the GOES time-lapse, the 25 km
+   CONUS grid, and the next-day floods on one interactive map.
 
 ## Notebooks
 
