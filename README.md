@@ -37,6 +37,15 @@ Requires Python ≥ 3.11 and [uv](https://github.com/astral-sh/uv).
 uv sync
 ```
 
+Notebook outputs are **not** tracked in git (a [nbstripout](https://github.com/kynan/nbstripout)
+filter strips them on commit while leaving them in your working copy). After cloning,
+enable it once:
+
+```bash
+.venv/bin/python -m pip install nbstripout
+.venv/bin/nbstripout --install --attributes .gitattributes
+```
+
 ### GPU / ML stack
 
 This project targets a CUDA GPU workstation (developed on 2× NVIDIA RTX PRO 6000
