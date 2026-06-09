@@ -38,15 +38,18 @@ Practical defaults:
   available for data-parallel (DDP) training or running two jobs/models at once.
 - Memory is plentiful — batch large reads rather than trickling them.
 
-## Storage layout
+## Storage layout — write to `/mnt/disk1` only (overflow to `/mnt/disk4`)
 
-Roughly 10 TB total spread across separate physical drives, mounted as
-`/mnt/disk1` … `/mnt/disk4` (each ~1.8 TB usable) plus the ~1 TB root NVMe.
+Drives are mounted as `/mnt/disk1` … `/mnt/disk4` (each ~1.8 TB usable) plus the ~1 TB
+root NVMe.
 
-- **GOES imagery lives on `/mnt/disk1/goes-data/`** — this is the current data home
-  and the download script's default. (~919 GB / ~15.6k NetCDF files already present.)
-- `disk2`–`disk4` are largely free and available for derived datasets, caches,
-  features, model checkpoints, etc. as the project grows.
+- **All of this project's data and generated artifacts go on `/mnt/disk1`.** GOES imagery
+  already lives at `/mnt/disk1/goes-data/` (~919 GB / ~15.6k NetCDF files); put derived
+  datasets, caches, features, model checkpoints, etc. under `/mnt/disk1` too.
+- **`/mnt/disk4` is the ONLY overflow** — use it only when `/mnt/disk1` cannot hold any
+  more. Check free space first (`df -h /mnt/disk1`) before assuming disk1 has room.
+- **Do NOT write to `/mnt/disk2` or `/mnt/disk3`** — they hold other projects' data
+  (e.g. FloodSimBench, hydrofabric) and are off-limits.
 - Keep large/generated artifacts **off the git tree** — `data/raw/` and the repo only
   hold the small ground-truth parquet and code; large files are gitignored.
 
@@ -134,4 +137,5 @@ Quick sanity check: `import torch; torch.cuda.device_count()` → `2`; `import c
 - Match the existing style in `src/goes_data.py`: typed signatures, clear docstrings,
   section banner comments, stdlib-first.
 - Default new heavy compute to multi-core / GPU paths (see Hardware).
-- Don't commit large data; write derived artifacts under `/mnt/diskN`, not the repo.
+- Don't commit large data; write derived artifacts under `/mnt/disk1` (overflow to
+  `/mnt/disk4` only), never `/mnt/disk2`–`disk3` or the repo.
