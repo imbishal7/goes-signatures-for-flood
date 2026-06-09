@@ -70,17 +70,21 @@ credentials). Satellite cutover: **GOES-16** through 2025-04-06, **GOES-19** fro
 ## Repo structure & key files
 
 ```
-src/goes_data.py          # GOES S3 downloader + storage estimator (CLI + importable)
-notebooks/explore.ipynb   # EDA on ground-truth flood events (spatial/temporal/area)
-notebooks/preview_goes.ipynb  # interactive viewer for downloaded GOES imagery (folium overlay, RGB, crop)
-data/raw/                 # ground-truth parquet only (large data gitignored)
-pyproject.toml / uv.lock  # deps, managed by uv
-README.md                 # user-facing setup & download docs
+src/download_goes.py             # GOES S3 downloader + storage estimator (CLI + importable)
+src/download_flood_data.py       # NWS FF/FA warning polygons (IEM) + groundsource fetch (Zenodo)
+notebooks/explore_flood_data.ipynb  # load/summarize groundsource + warnings; build unified frame
+notebooks/clouds_vs_floods.ipynb    # GOES time-lapse + 25km grid + next-day flood overlay (self-contained)
+notebooks/preview_goes.ipynb        # interactive viewer for GOES imagery (folium overlay, RGB, crop)
+data/raw/                        # groundsource parquet (large data gitignored)
+data/flood_warnings/             # warning polygons + unified flood frame (gitignored)
+pyproject.toml / uv.lock         # deps, managed by uv
+README.md                        # user-facing setup & download docs
 ```
 
-`src/goes_data.py` is the most important module so far — it handles satellite
+`src/download_goes.py` is the most important module so far — it handles satellite
 selection by date, per-thread S3 clients, closest-to-target-minute file selection,
 resumable parallel downloads, and an `estimate` vs `--dry-run` (exact size) split.
+The notebooks are self-contained (helpers inlined, not imported from `src/`).
 
 ## Environment & commands
 
@@ -88,11 +92,13 @@ Python ≥ 3.11, managed with **uv**. Run things via `uv run ...` (or the projec
 `.venv`).
 
 ```bash
-uv sync                                            # install deps
-uv run jupyter lab                                 # notebooks
-uv run python src/goes_data.py estimate            # rough storage projection
-uv run python src/goes_data.py download --dry-run  # exact size, no fetch
-uv run python src/goes_data.py download            # 6 daytime imgs/day -> /mnt/disk1
+uv sync                                                  # install deps
+uv run jupyter lab                                       # notebooks
+uv run python src/download_goes.py estimate              # rough storage projection
+uv run python src/download_goes.py download --dry-run    # exact size, no fetch
+uv run python src/download_goes.py download              # 6 daytime imgs/day -> /mnt/disk1
+uv run python src/download_flood_data.py groundsource  # fetch groundsource parquet (Zenodo)
+uv run python src/download_flood_data.py warnings      # pull NWS FF/FA warning polygons (IEM)
 ```
 
 Lint: **ruff** (line length 88, rules `E`,`F`,`I`). Tests: pytest (none yet).
@@ -134,7 +140,7 @@ Quick sanity check: `import torch; torch.cuda.device_count()` → `2`; `import c
 
 ## Conventions
 
-- Match the existing style in `src/goes_data.py`: typed signatures, clear docstrings,
+- Match the existing style in `src/download_goes.py`: typed signatures, clear docstrings,
   section banner comments, stdlib-first.
 - Default new heavy compute to multi-core / GPU paths (see Hardware).
 - Don't commit large data; write derived artifacts under `/mnt/disk1` (overflow to

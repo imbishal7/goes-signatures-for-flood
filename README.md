@@ -10,10 +10,12 @@ flood-prediction/
 │   └── raw/          # ground truth flood event records (parquet)
 │                     # GOES imagery (NetCDF) downloads to /mnt/disk1/goes-data/
 ├── notebooks/
-│   ├── explore.ipynb      # exploratory analysis of ground truth data
-│   └── preview_goes.ipynb # interactive viewer for downloaded GOES imagery
+│   ├── explore_flood_data.ipynb  # load/summarize groundsource + warnings; unified frame
+│   ├── clouds_vs_floods.ipynb    # GOES time-lapse + 25km grid + next-day flood overlay
+│   └── preview_goes.ipynb        # interactive viewer for downloaded GOES imagery
 ├── src/
-│   └── goes_data.py  # GOES download script (CLI + importable module)
+│   ├── download_goes.py            # GOES download script (CLI + importable module)
+│   └── download_flood_data.py      # NWS FF/FA warnings (IEM) + groundsource fetch (Zenodo)
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -72,10 +74,10 @@ Imagery is downloaded from NOAA's public AWS S3 buckets (`noaa-goes16`, `noaa-go
 
 ```bash
 # 1 image/day (default)
-uv run python src/goes_data.py estimate
+uv run python src/download_goes.py estimate
 
 # 6 images/day
-uv run python src/goes_data.py estimate --images-per-day 6
+uv run python src/download_goes.py estimate --images-per-day 6
 ```
 
 Expected output (2020 – 2026-02-28):
@@ -95,23 +97,41 @@ Storage               676.1G     115.3G     791.4G
 
 ```bash
 # Dry-run: list every file and report the EXACT total size (no fetching)
-uv run python src/goes_data.py download --dry-run
+uv run python src/download_goes.py download --dry-run
 
 # Full download — default: 6 daytime images/day (16-21 UTC) -> /mnt/disk1/goes-data
-uv run python src/goes_data.py download
+uv run python src/download_goes.py download
 
 # Custom date range or hour
-uv run python src/goes_data.py download \
+uv run python src/download_goes.py download \
   --start-date 2023-01-01 --end-date 2023-12-31 \
   --workers 32
 
 # 1 image/day, or a custom location (override the 6/day + path defaults)
-uv run python src/goes_data.py download --hour 18 --data-dir /some/other/path
+uv run python src/download_goes.py download --hour 18 --data-dir /some/other/path
 ```
 
 Downloads are resumable — already-downloaded files are skipped automatically. Files are saved to `/mnt/disk1/goes-data/GOES{16|19}/YYYY/MM/DD/` by default (override with `--data-dir`).
 
 > **Tip:** `--dry-run` reports the **exact** total download size, summed from real S3 object sizes (nothing is fetched). Use it when you need an accurate figure; `estimate` is a faster rough projection at ~60 MB/file.
+
+## Flood ground truth
+
+Two complementary flood layers, both fetched via `src/download_flood_data.py`:
+
+```bash
+# groundsource flood-extent polygons (~637 MB) from Zenodo -> data/raw/
+uv run python src/download_flood_data.py groundsource
+
+# NWS Flash Flood + Areal Flood warning polygons (CONUS, 2019-2026) from IEM
+# -> data/flood_warnings/flood_warnings_conus.{parquet,csv}
+uv run python src/download_flood_data.py warnings
+```
+
+Both are idempotent/resumable. The `warnings` pull caches each fetched polygon, so
+re-runs only fetch what's missing; `groundsource` skips if the file is already
+present (use `--force` to re-download). `explore_flood_data.ipynb` then merges them
+into the unified frame the `clouds_vs_floods.ipynb` overlay reads.
 
 ## Notebooks
 
@@ -119,7 +139,8 @@ Launch with `uv run jupyter lab`.
 
 | Notebook | Description |
 |---|---|
-| [notebooks/explore.ipynb](notebooks/explore.ipynb) | Exploratory analysis of ground truth flood event data: spatial distribution, temporal coverage, area statistics |
+| [notebooks/explore_flood_data.ipynb](notebooks/explore_flood_data.ipynb) | Load and summarize both flood layers (groundsource extents + NWS FF/FA warnings), then build one harmonized GeoDataFrame (`data/flood_warnings/floods_unified.parquet`) keyed by issue/expire date, area, and geometry |
+| [notebooks/clouds_vs_floods.ipynb](notebooks/clouds_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a 25 km CONUS land grid + the unified flood layer (groundsource / flash-flood / areal-flood) as toggleable overlays on one scroll-zoom map |
 | [notebooks/preview_goes.ipynb](notebooks/preview_goes.ipynb) | Preview downloaded GOES imagery: pick a date/file, view any band or a true-color RGB, then overlay it on an interactive folium map (scroll-zoom/pan, switchable basemaps) reprojected to lat/lon; crop to a lon/lat or pixel box; plus quick static previews |
 
 ## Band Reference
