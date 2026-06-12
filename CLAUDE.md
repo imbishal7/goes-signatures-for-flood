@@ -56,9 +56,30 @@ root NVMe.
 ## Data
 
 ### Ground truth — flood events
-`data/raw/groundsource_2026.parquet` (~637 MB). ~2.65M rows, columns:
-`uuid`, `area_km2`, `geometry` (WKB-encoded polygons/multipolygons), `start_date`,
-`end_date` (dates stored as strings). Source: Zenodo record 18647054.
+Three complementary layers, all fetched via `src/download_flood_data.py`
+(subcommands `groundsource` / `warnings` / `storms` / `all`; each
+idempotent/resumable). They differ in nature — observed extent vs. issued
+prediction vs. confirmed occurrence — so keep them distinct when labeling:
+
+1. **groundsource** — `data/raw/groundsource_2026.parquet` (~637 MB). ~2.65M rows,
+   columns: `uuid`, `area_km2`, `geometry` (WKB polygons/multipolygons),
+   `start_date`, `end_date` (strings, day resolution). Remotely-sensed flood
+   *extents*. Source: Zenodo record 18647054.
+2. **NWS warnings** — `data/flood_warnings/flood_warnings_conus.parquet` (~6 MB).
+   ~40k forecaster-issued Flash Flood (FF) + Areal Flood (FA) *Warning* polygons,
+   CONUS 2019-on, minute-resolution issue/expire. Source: IEM VTEC services.
+3. **Storm events** — `data/storm_events/storm_events_flood.parquet` (~11 MB).
+   NCEI Storm Events Database: human-confirmed flood *occurrences* (Flash Flood /
+   Flood / Heavy Rain / Debris Flow) as **points**, one row per (event, location
+   point) (~55k events / ~183k points, CONUS 2019-on). UTC begin/end (converted
+   from fixed standard local time), `flood_cause`, damages (parsed to USD),
+   injuries/deaths, report source, narrative. Raw NCEI csv.gz files are cached
+   under `data/storm_events/raw/` by version stamp (NCEI re-stamps monthly).
+
+Cross-layer agreement is partial (2019–2026: ~72% of flood/flash-flood storm
+events fall inside an active warning; only ~45% of warnings contain an observed
+event; warnings vs groundsource agree on only ~24% of 25 km cell-days) — the
+choice of label source materially changes the training target.
 
 ### GOES imagery
 NOAA ABI-L2-MCMIPC (multi-band cloud & moisture, CONUS sector — all 16 ABI bands per
@@ -67,16 +88,27 @@ credentials). Satellite cutover: **GOES-16** through 2025-04-06, **GOES-19** fro
 2025-04-07 on. Default pull is **6 daytime images/day** (16–21 UTC) →
 `/mnt/disk1/goes-data/GOES{16|19}/YYYY/MM/DD/`. Downloads are resumable/idempotent.
 
+### GLM lightning
+GOES GLM-L2-LCFA lightning **flashes** (same buckets/cutover as ABI), consolidated by
+`src/download_glm.py` to **one parquet per day** at
+`/mnt/disk1/glm-data/YYYY/glm_flashes_YYYYMMDD.parquet` (raw ~4,320 NetCDFs/day are
+parsed in memory and discarded). Columns: `time_start`, `time_end`, `lat`, `lon`,
+`energy`, `area`, `quality_flag`; clipped to CONUS + ~5°. Resumable/idempotent.
+
 ## Repo structure & key files
 
 ```
 src/download_goes.py             # GOES S3 downloader + storage estimator (CLI + importable)
-src/download_flood_data.py       # NWS FF/FA warning polygons (IEM) + groundsource fetch (Zenodo)
-notebooks/explore_flood_data.ipynb  # load/summarize groundsource + warnings; build unified frame
-notebooks/clouds_vs_floods.ipynb    # GOES time-lapse + 25km grid + next-day flood overlay (self-contained)
-notebooks/preview_goes.ipynb        # interactive viewer for GOES imagery (folium overlay, RGB, crop)
+src/download_flood_data.py       # ALL flood ground truth: groundsource (Zenodo) + NWS FF/FA
+                                 #   warnings (IEM) + NCEI storm events; subcommand `all`
+src/download_glm.py              # GLM lightning flashes -> one parquet/day (/mnt/disk1/glm-data)
+notebooks/explore/goes_data_explore.ipynb   # GOES imagery alone: inventory, bands, single-frame map
+notebooks/explore/flood_data_explore.ipynb  # groundsource + warnings; builds floods_unified.parquet
+notebooks/explore/glm_data_explore.ipynb    # GLM flashes alone: availability, daily counts, density
+notebooks/clouds_vs_floods.ipynb            # combined overlay + synced time-lapse (clouds, floods, lightning)
 data/raw/                        # groundsource parquet (large data gitignored)
 data/flood_warnings/             # warning polygons + unified flood frame (gitignored)
+data/storm_events/               # NCEI storm-events flood parquet + raw csv.gz cache
 pyproject.toml / uv.lock         # deps, managed by uv
 README.md                        # user-facing setup & download docs
 ```
@@ -99,7 +131,14 @@ uv run python src/download_goes.py download --dry-run    # exact size, no fetch
 uv run python src/download_goes.py download              # 6 daytime imgs/day -> /mnt/disk1
 uv run python src/download_flood_data.py groundsource  # fetch groundsource parquet (Zenodo)
 uv run python src/download_flood_data.py warnings      # pull NWS FF/FA warning polygons (IEM)
+uv run python src/download_flood_data.py storms        # NCEI storm-events flood reports (points)
+uv run python src/download_flood_data.py all           # all three flood layers
+uv run python src/download_glm.py build                # GLM flashes -> 1 parquet/day (resumable)
 ```
+
+> Note: the venv's console-script shebangs can go stale if the repo directory is
+> renamed (e.g. `jupyter` failing with "required file not found") — use
+> `uv run python -m <module>` or re-run `uv sync` to fix them.
 
 Lint: **ruff** (line length 88, rules `E`,`F`,`I`). Tests: pytest (none yet).
 

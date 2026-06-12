@@ -5,26 +5,34 @@ A research project that uses GOES-16 and GOES-19 satellite imagery (ABI-L2-MCMIP
 > **Status: early research — the prediction target is not finalized.** The current
 > focus is exploratory: watching a day's GOES cloud time-lapse over CONUS against the
 > *next day's* flood polygons on one interactive map, to see whether cloud and
-> moisture movement lines up with where extreme flooding appears. Two flood
-> ground-truth layers back this up — observed flood extents (**groundsource**) and
-> NWS flood **warnings** (flash-flood + areal-flood) — merged into a single unified
-> parquet.
+> moisture movement lines up with where extreme flooding appears. Three flood
+> ground-truth layers back this up: observed flood extents (**groundsource**),
+> NWS flood **warnings** (flash-flood + areal-flood, forecaster-issued), and
+> NCEI **storm events** — human-confirmed flood *occurrences* (points with UTC
+> times, impacts, and narratives, reported by emergency managers, gauges, law
+> enforcement, the public, ...). Groundsource + warnings are merged into a single
+> unified parquet; storm events are the independent "a flood really happened
+> here" check.
 
 ## Project Structure
 
 ```
-flood-prediction/
+goes-signatures-for-flood/
 ├── data/
 │   ├── raw/                # groundsource flood-extent parquet (downloaded, gitignored)
-│   └── flood_warnings/     # floods_unified.parquet (committed) + build intermediates
+│   ├── flood_warnings/     # floods_unified.parquet (committed) + build intermediates
+│   └── storm_events/       # storm_events_flood.parquet (NCEI observed flood reports)
 │                           # GOES imagery (NetCDF) downloads to /mnt/disk1/goes-data/
 ├── notebooks/
-│   ├── explore_flood_data.ipynb  # load/summarize groundsource + warnings; unified frame
-│   ├── clouds_vs_floods.ipynb    # GOES time-lapse + 25km grid + next-day flood overlay
-│   └── preview_goes.ipynb        # interactive viewer for downloaded GOES imagery
+│   ├── explore/
+│   │   ├── goes_data_explore.ipynb   # GOES imagery: disk inventory, bands, single-frame map
+│   │   ├── flood_data_explore.ipynb  # groundsource + warnings; builds floods_unified.parquet
+│   │   └── glm_data_explore.ipynb    # GLM flashes: availability, daily counts, density
+│   └── clouds_vs_floods.ipynb        # combined overlay + time-lapse (clouds, floods, lightning)
 ├── src/
 │   ├── download_goes.py            # GOES download script (CLI + importable module)
-│   └── download_flood_data.py      # NWS FF/FA warnings (IEM) + groundsource fetch (Zenodo)
+│   ├── download_flood_data.py      # ALL flood ground truth: groundsource + warnings + storm events
+│   └── download_glm.py             # GLM lightning flashes -> one parquet/day (/mnt/disk1/glm-data)
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -69,7 +77,8 @@ cleanly and pins numpy down:
 
 ### Flood ground truth
 
-Two complementary flood layers, both fetched via `src/download_flood_data.py`:
+Three complementary flood layers, all fetched via `src/download_flood_data.py`
+(`all` runs the three in sequence):
 
 ```bash
 # groundsource flood-extent polygons (~637 MB) from Zenodo -> data/raw/
@@ -78,14 +87,40 @@ uv run python src/download_flood_data.py groundsource
 # NWS Flash Flood + Areal Flood warning polygons (CONUS, 2019-2026) from IEM
 # -> data/flood_warnings/flood_warnings_conus.parquet
 uv run python src/download_flood_data.py warnings
+
+# NCEI Storm Events flood reports (observed occurrences, points)
+# -> data/storm_events/storm_events_flood.parquet
+uv run python src/download_flood_data.py storms
+
+# everything above
+uv run python src/download_flood_data.py all
 ```
 
-Both are idempotent/resumable: `warnings` caches each fetched polygon so re-runs
-only fetch what's missing, and `groundsource` skips if the file is already present
-(`--force` to re-download). `explore_flood_data.ipynb` merges the two into the
-**unified** layer at `data/flood_warnings/floods_unified.parquet` — the one flood
-artifact committed to the repo, so you can use it directly without re-downloading or
-rebuilding.
+The three layers differ in nature — keep that in mind when using them as labels:
+
+| layer | what it is | geometry | time resolution |
+|---|---|---|---|
+| groundsource | remotely-sensed flood *extents* | polygons | day (start/end date) |
+| warnings | forecaster-issued *predictions* | polygons | minute (issue/expire) |
+| storm events | human-confirmed *occurrences* with impacts | points | minute (UTC begin/end) |
+
+**Storm events** come from the NCEI Storm Events Database bulk CSVs (details +
+locations tables, re-stamped monthly by NCEI): flood-related event types (Flash
+Flood / Flood / Heavy Rain / Debris Flow) with UTC times, flood cause, damage
+estimates, injuries/deaths, report source (emergency managers, gauges, law
+enforcement, public, ...), and narratives — one row per (event, location point),
+CONUS, 2019 on (~55k events / ~183k points, ~11 MB). They are *observations*,
+not warnings — though not fully independent of the warning process, since NWS
+offices compile them partly to verify their own warnings (in 2019–2026, ~72% of
+flood/flash-flood events fall inside an active warning, while only ~45% of
+warnings contain an observed event).
+
+All subcommands are idempotent/resumable: `warnings` caches each fetched polygon,
+`storms` caches the raw NCEI files by version stamp, and `groundsource` skips if
+present (`--force` to re-download). `flood_data_explore.ipynb` merges groundsource
++ warnings into the **unified** layer at `data/flood_warnings/floods_unified.parquet`
+— the one flood artifact committed to the repo, so you can use it directly without
+re-downloading or rebuilding.
 
 ### GOES Satellite Imagery
 
@@ -146,11 +181,12 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 
 ## Workflow
 
-1. **Flood ground truth** — `download_flood_data.py groundsource` + `warnings`, or
-   just use the committed `data/flood_warnings/floods_unified.parquet`.
+1. **Flood ground truth** — `download_flood_data.py all` (groundsource + warnings +
+   storm events), or just use the committed `data/flood_warnings/floods_unified.parquet`.
 2. **GOES imagery** — `download_goes.py download` for the dates of interest.
-3. **Explore** — `explore_flood_data.ipynb` summarizes both layers and (re)builds the
-   unified parquet.
+3. **Explore** — the `notebooks/explore/` notebooks summarize each dataset;
+   `flood_data_explore.ipynb` (re)builds the unified parquet and cross-checks the
+   flood layers against each other.
 4. **Compare** — `clouds_vs_floods.ipynb` overlays the GOES time-lapse, the 25 km
    CONUS grid, and the next-day floods on one interactive map.
 
@@ -160,9 +196,11 @@ Launch with `uv run jupyter lab`.
 
 | Notebook | Description |
 |---|---|
-| [notebooks/explore_flood_data.ipynb](notebooks/explore_flood_data.ipynb) | Load and summarize both flood layers (groundsource extents + NWS FF/FA warnings), then build one harmonized GeoDataFrame (`data/flood_warnings/floods_unified.parquet`) keyed by issue/expire date, area, and geometry |
-| [notebooks/clouds_vs_floods.ipynb](notebooks/clouds_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a 25 km CONUS land grid + the unified flood layer (groundsource / flash-flood / areal-flood) as toggleable overlays on one scroll-zoom map |
-| [notebooks/preview_goes.ipynb](notebooks/preview_goes.ipynb) | Preview downloaded GOES imagery: pick a date/file, view any band or a true-color RGB, then overlay it on an interactive folium map (scroll-zoom/pan, switchable basemaps) reprojected to lat/lon; crop to a lon/lat or pixel box; plus quick static previews |
+| [notebooks/explore/flood_data_explore.ipynb](notebooks/explore/flood_data_explore.ipynb) | Load and summarize the flood layers (groundsource extents + NWS FF/FA warnings), build the harmonized `floods_unified.parquet`, and verify warnings against observations (per-warning verification + a 25 km cell-day classification report) |
+| [notebooks/explore/goes_data_explore.ipynb](notebooks/explore/goes_data_explore.ipynb) | Explore downloaded GOES imagery: disk inventory, pick a date/file, view any band or a true-color RGB, overlay a frame on an interactive folium map, crop to a region |
+| [notebooks/explore/glm_data_explore.ipynb](notebooks/explore/glm_data_explore.ipynb) | Explore GLM lightning flashes: days built so far, flashes/day time series, one day in detail (stats, diurnal cycle, spatial density) |
+| [notebooks/clouds_vs_floods.ipynb](notebooks/clouds_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a 25 km CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
+| [notebooks/unet_convlstm_plan.ipynb](notebooks/unet_convlstm_plan.ipynb) | Architecture sketch for the planned U-Net ConvLSTM model (visualkeras diagrams, size/memory estimates, training plan) |
 
 ## Band Reference
 

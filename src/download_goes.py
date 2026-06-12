@@ -46,8 +46,12 @@ GOES19_START_DATE = date(2025, 4, 7)
 DEFAULT_TARGET_HOURS = [16, 17, 18, 19, 20, 21]
 TYPICAL_FILE_SIZE_MB = 60.0   # verified: 57–61 MB per file
 
-DEFAULT_START = date(2019, 1, 1)
-DEFAULT_END = date(2026, 2, 28)
+# DEFAULT_START = date(2019, 1, 1)
+# DEFAULT_END = date(2026, 2, 28)
+
+DEFAULT_START = date(2026, 2, 28)
+DEFAULT_END = date(2026, 6, 9)
+
 DEFAULT_DATA_DIR = Path("/mnt/disk1/goes-data")
 DEFAULT_WORKERS = 25           # saturates 100 MB/s with ~60 MB files
 

@@ -51,7 +51,7 @@ GOES16_END_DATE = date(2025, 4, 6)
 
 # Default range matches the ABI/GOES download span (see download_goes.py).
 DEFAULT_START_DATE = date(2019, 1, 1)
-DEFAULT_END_DATE = date(2026, 2, 28)
+DEFAULT_END_DATE = date(2026, 6, 9)
 
 # Clip boxes (lon_min, lon_max, lat_min, lat_max); None = full disk.
 CLIP_BOXES: dict[str, tuple[float, float, float, float] | None] = {

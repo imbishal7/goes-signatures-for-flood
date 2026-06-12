@@ -29,17 +29,35 @@ ground-truth layer to pair with the GOES imagery. Written under the repo's data/
 dir. Runs are resumable: the event list and each fetched polygon are cached, so
 re-running only fetches what is missing.
 
-This script also fetches the companion *groundsource* flood-extent dataset from
-Zenodo (the ``groundsource`` subcommand) so the full flood ground truth can be
-reproduced from one place.
+This script is the single entry point for all flood ground truth:
+
+  groundsource  observed flood *extents* (polygons) from Zenodo  -> data/raw/
+  warnings      NWS FF/FA warning polygons from IEM              -> data/flood_warnings/
+  storms        NCEI Storm Events flood reports (points)         -> data/storm_events/
+  all           everything above
+
+The ``storms`` subcommand pulls the NCEI Storm Events Database bulk CSVs
+(https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/): the per-year
+*details* table (EVENT_TYPE, local begin/end times + timezone, damages, flood
+cause, narrative) joined with the *locations* table (precise per-event points;
+BEGIN_LAT/LON fallback). Flood-related event types only; times converted to
+UTC (Storm Events records fixed standard local time, e.g. "CST-6"). The
+``c{stamp}`` in NCEI file names changes monthly as data is revised, so the
+directory listing is scraped for the newest stamp; raw .csv.gz files are
+cached under data/storm_events/raw/ and only re-downloaded on a new stamp.
+
+All subcommands are idempotent / resumable.
 
 CLI:
   python src/download_flood_data.py warnings [--start-year ... --workers ...]
   python src/download_flood_data.py groundsource [--dest PATH --force]
+  python src/download_flood_data.py storms [--start-year ... --types ...]
+  python src/download_flood_data.py all [--start-year ... --end-year ...]
 """
 
 import argparse
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -47,6 +65,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import geopandas as gpd
+import numpy as np
+import pandas as pd
 from shapely.geometry import shape
 from shapely.ops import unary_union
 from tqdm import tqdm
@@ -90,6 +110,32 @@ DEFAULT_GROUNDSOURCE_DEST = (
     Path(__file__).resolve().parent.parent / "data" / "raw" / GROUNDSOURCE_FILE
 )
 
+# NCEI Storm Events Database bulk CSVs (public, no key).
+NCEI_BASE_URL = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/"
+NCEI_FILE_RE = re.compile(
+    r"StormEvents_(details|locations)-ftp_v1\.0_d(\d{4})_c(\d{8})\.csv\.gz"
+)
+
+# Flood-related EVENT_TYPE values to keep (full vocabulary is much larger).
+FLOOD_EVENT_TYPES = ("Flash Flood", "Flood", "Heavy Rain", "Debris Flow")
+
+DEFAULT_STORM_OUT_DIR = (
+    Path(__file__).resolve().parent.parent / "data" / "storm_events"
+)
+
+# Clip boxes (lon_min, lon_max, lat_min, lat_max); None = keep everything.
+BBOXES: dict[str, tuple[float, float, float, float] | None] = {
+    "conus": (-125.0, -66.5, 24.0, 50.0),
+    "full": None,
+}
+
+STORM_DETAIL_COLS = [
+    "EPISODE_ID", "EVENT_ID", "STATE", "EVENT_TYPE", "CZ_TYPE", "CZ_NAME",
+    "WFO", "BEGIN_DATE_TIME", "CZ_TIMEZONE", "END_DATE_TIME",
+    "INJURIES_DIRECT", "DEATHS_DIRECT", "DAMAGE_PROPERTY", "DAMAGE_CROPS",
+    "SOURCE", "FLOOD_CAUSE", "BEGIN_LAT", "BEGIN_LON", "EVENT_NARRATIVE",
+]
+
 
 # ---------------------------------------------------------------------------
 # HTTP with retries
@@ -106,6 +152,22 @@ def _get_json(url: str, timeout: int = 90) -> dict | None:
                 return None
             time.sleep(_BACKOFF * (2 ** attempt))
     return None
+
+
+def _get_bytes(url: str, timeout: int = 120) -> bytes:
+    """GET a URL and return raw bytes, retrying with exponential backoff."""
+    for attempt in range(_RETRIES):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "goes-signatures-for-flood"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == _RETRIES - 1:
+                raise
+            time.sleep(_BACKOFF * (2 ** attempt))
+    raise RuntimeError("unreachable")
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +363,10 @@ def write_outputs(gdf: gpd.GeoDataFrame, out_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Orchestration
+# Warnings orchestration
 # ---------------------------------------------------------------------------
 
-def run(
+def run_warnings(
     start_year: int = DEFAULT_START_YEAR,
     end_year: int = DEFAULT_END_YEAR,
     states: list[str] | None = None,
@@ -374,6 +436,179 @@ def download_groundsource(
 
 
 # ---------------------------------------------------------------------------
+# NCEI Storm Events — remote listing + raw-file cache
+# ---------------------------------------------------------------------------
+
+def _list_ncei_files() -> dict[tuple[str, int], str]:
+    """(table, year) -> newest filename, from the NCEI directory listing."""
+    html = _get_bytes(NCEI_BASE_URL).decode("utf-8", errors="replace")
+    newest: dict[tuple[str, int], str] = {}
+    for m in NCEI_FILE_RE.finditer(html):
+        table, year, stamp = m.group(1), int(m.group(2)), m.group(3)
+        key = (table, year)
+        if key not in newest or stamp > NCEI_FILE_RE.match(newest[key]).group(3):
+            newest[key] = m.group(0)
+    return newest
+
+
+def _download_ncei_raw(
+    remote: dict[tuple[str, int], str],
+    years: list[int],
+    raw_dir: Path,
+    workers: int,
+) -> dict[tuple[str, int], Path]:
+    """Fetch details+locations files for the years (cached, parallel)."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    wanted = {
+        (table, y): remote[(table, y)]
+        for y in years for table in ("details", "locations")
+        if (table, y) in remote
+    }
+    todo = {k: v for k, v in wanted.items() if not (raw_dir / v).exists()}
+    print(f"{len(wanted)} files | {len(wanted) - len(todo)} cached "
+          f"| downloading {len(todo)}")
+
+    def _fetch(key: tuple[str, int]) -> None:
+        name = wanted[key]
+        tmp = raw_dir / (name + ".part")
+        tmp.write_bytes(_get_bytes(NCEI_BASE_URL + name))
+        tmp.replace(raw_dir / name)
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_fetch, k): k for k in todo}
+            for fut in tqdm(as_completed(futures), total=len(futures),
+                            desc="download", unit="file"):
+                fut.result()
+    return {k: raw_dir / v for k, v in wanted.items()}
+
+
+# ---------------------------------------------------------------------------
+# NCEI Storm Events — parsing
+# ---------------------------------------------------------------------------
+
+def _to_utc(local: pd.Series, tz: pd.Series) -> pd.Series:
+    """'28-APR-19 14:45:00' in zone 'CST-6' -> tz-naive UTC timestamps."""
+    t = pd.to_datetime(local, format="%d-%b-%y %H:%M:%S")
+    offset = (tz.str.extract(r"(-?\d+)\s*$")[0].astype("float")
+              .fillna(0.0))                      # zones are standard-time fixed
+    return t - pd.to_timedelta(offset, unit="h")
+
+
+def _damage_usd(s: pd.Series) -> pd.Series:
+    """'10.00K' / '2.5M' / '1.2B' / '' -> dollars (NaN when absent)."""
+    ext = s.fillna("").str.strip().str.extract(r"^([\d.]+)([KMBkmb])?$")
+    mult = ext[1].str.upper().map({"K": 1e3, "M": 1e6, "B": 1e9}).fillna(1.0)
+    return pd.to_numeric(ext[0], errors="coerce") * mult
+
+
+def _load_storm_year(
+    year: int,
+    paths: dict[tuple[str, int], Path],
+    types: tuple[str, ...],
+) -> pd.DataFrame | None:
+    """Flood events for one year, one row per (event, location point)."""
+    if ("details", year) not in paths:
+        return None
+    d = pd.read_csv(paths[("details", year)], usecols=STORM_DETAIL_COLS,
+                    low_memory=False)
+    d = d[d["EVENT_TYPE"].isin(types)].copy()
+    if d.empty:
+        return None
+    d["begin_utc"] = _to_utc(d["BEGIN_DATE_TIME"], d["CZ_TIMEZONE"])
+    d["end_utc"] = _to_utc(d["END_DATE_TIME"], d["CZ_TIMEZONE"])
+    d["damage_property_usd"] = _damage_usd(d["DAMAGE_PROPERTY"])
+    d["damage_crops_usd"] = _damage_usd(d["DAMAGE_CROPS"])
+
+    # precise points where the locations table has them; BEGIN_LAT/LON fallback
+    if ("locations", year) in paths:
+        locs = pd.read_csv(
+            paths[("locations", year)],
+            usecols=["EVENT_ID", "LOCATION_INDEX", "LATITUDE", "LONGITUDE"],
+        )
+        m = d.merge(locs, on="EVENT_ID", how="left")
+    else:
+        m = d.assign(LOCATION_INDEX=np.nan, LATITUDE=np.nan, LONGITUDE=np.nan)
+    fallback = m["LATITUDE"].isna()
+    m.loc[fallback, "LATITUDE"] = m.loc[fallback, "BEGIN_LAT"]
+    m.loc[fallback, "LONGITUDE"] = m.loc[fallback, "BEGIN_LON"]
+    m["geom_source"] = np.select(
+        [~fallback, m["LATITUDE"].notna()], ["locations", "begin_latlon"],
+        default="none",
+    )
+
+    return pd.DataFrame({
+        "event_id": m["EVENT_ID"],
+        "episode_id": m["EPISODE_ID"],
+        "event_type": m["EVENT_TYPE"],
+        "flood_cause": m["FLOOD_CAUSE"],
+        "state": m["STATE"],
+        "cz_type": m["CZ_TYPE"],
+        "cz_name": m["CZ_NAME"],
+        "wfo": m["WFO"],
+        "begin_utc": m["begin_utc"],
+        "end_utc": m["end_utc"],
+        "lat": m["LATITUDE"].astype("float32"),
+        "lon": m["LONGITUDE"].astype("float32"),
+        "point_index": m["LOCATION_INDEX"].fillna(0).astype("int16"),
+        "geom_source": m["geom_source"],
+        "injuries_direct": m["INJURIES_DIRECT"].astype("int32"),
+        "deaths_direct": m["DEATHS_DIRECT"].astype("int32"),
+        "damage_property_usd": m["damage_property_usd"],
+        "damage_crops_usd": m["damage_crops_usd"],
+        "report_source": m["SOURCE"],
+        "narrative": m["EVENT_NARRATIVE"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Storm Events orchestration
+# ---------------------------------------------------------------------------
+
+def run_storms(
+    start_year: int = DEFAULT_START_YEAR,
+    end_year: int = DEFAULT_END_YEAR,
+    types: tuple[str, ...] = FLOOD_EVENT_TYPES,
+    bbox_name: str = "conus",
+    out_dir: Path = DEFAULT_STORM_OUT_DIR,
+    workers: int = DEFAULT_WORKERS,
+) -> gpd.GeoDataFrame:
+    """Pull, filter, and write the flood storm-events point GeoParquet."""
+    years = list(range(start_year, end_year + 1))
+    print(f"Years {start_year}-{end_year} | types {list(types)} "
+          f"| bbox {bbox_name} | workers {workers}")
+
+    remote = _list_ncei_files()
+    paths = _download_ncei_raw(remote, years, out_dir / "raw", workers)
+
+    frames = [f for y in years
+              if (f := _load_storm_year(y, paths, types)) is not None]
+    df = pd.concat(frames, ignore_index=True)
+
+    bbox = BBOXES[bbox_name]
+    if bbox is not None:
+        lon_min, lon_max, lat_min, lat_max = bbox
+        keep = (df["lon"].between(lon_min, lon_max)
+                & df["lat"].between(lat_min, lat_max))
+        df = df[keep | df["lat"].isna()].reset_index(drop=True)
+
+    gdf = gpd.GeoDataFrame(
+        df, geometry=gpd.points_from_xy(df["lon"], df["lat"]), crs="EPSG:4326"
+    ).sort_values(["begin_utc", "event_id", "point_index"]).reset_index(drop=True)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "storm_events_flood.parquet"
+    gdf.to_parquet(out_path)
+    n_events = gdf["event_id"].nunique()
+    by_type = gdf.drop_duplicates("event_id")["event_type"].value_counts()
+    print(f"\nwrote {out_path}")
+    print(f"{len(gdf):,} point rows | {n_events:,} events "
+          f"| by type: {by_type.to_dict()}")
+    print(f"geom_source: {gdf.geom_source.value_counts().to_dict()}")
+    return gdf
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -414,13 +649,37 @@ def parse_args() -> argparse.Namespace:
         "--force", action="store_true", help="Re-download even if present."
     )
 
+    # -- storms subcommand (NCEI Storm Events pull) --------------------------
+    s = sub.add_parser(
+        "storms",
+        help="Pull NCEI Storm Events flood reports (points) into a GeoParquet.",
+    )
+    s.add_argument("--start-year", type=int, default=DEFAULT_START_YEAR)
+    s.add_argument("--end-year", type=int, default=DEFAULT_END_YEAR)
+    s.add_argument(
+        "--types", nargs="+", default=list(FLOOD_EVENT_TYPES), metavar="TYPE",
+        help=f"EVENT_TYPE values to keep (default: {list(FLOOD_EVENT_TYPES)}).",
+    )
+    s.add_argument("--bbox", default="conus", choices=list(BBOXES),
+                   help="Spatial clip (default: conus).")
+    s.add_argument("--out", default=str(DEFAULT_STORM_OUT_DIR), metavar="DIR")
+    s.add_argument("--workers", type=int, default=DEFAULT_WORKERS, metavar="N")
+
+    # -- all subcommand (everything) ------------------------------------------
+    a = sub.add_parser(
+        "all", help="Download all three layers: groundsource, warnings, storms."
+    )
+    a.add_argument("--start-year", type=int, default=DEFAULT_START_YEAR)
+    a.add_argument("--end-year", type=int, default=DEFAULT_END_YEAR)
+    a.add_argument("--workers", type=int, default=DEFAULT_WORKERS, metavar="N")
+
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     if args.command == "warnings":
-        run(
+        run_warnings(
             start_year=args.start_year,
             end_year=args.end_year,
             states=args.states,
@@ -430,6 +689,30 @@ def main() -> None:
         )
     elif args.command == "groundsource":
         download_groundsource(dest=Path(args.dest), force=args.force)
+    elif args.command == "storms":
+        run_storms(
+            start_year=args.start_year,
+            end_year=args.end_year,
+            types=tuple(args.types),
+            bbox_name=args.bbox,
+            out_dir=Path(args.out),
+            workers=args.workers,
+        )
+    elif args.command == "all":
+        print("=" * 70)
+        print("1/3  groundsource flood extents (Zenodo) -> data/raw/")
+        print("=" * 70)
+        download_groundsource()
+        print("=" * 70)
+        print("2/3  NWS FF/FA warnings (IEM) -> data/flood_warnings/")
+        print("=" * 70)
+        run_warnings(start_year=args.start_year, end_year=args.end_year,
+                     workers=args.workers)
+        print("=" * 70)
+        print("3/3  NCEI Storm Events -> data/storm_events/")
+        print("=" * 70)
+        run_storms(start_year=args.start_year, end_year=args.end_year,
+                   workers=args.workers)
 
 
 if __name__ == "__main__":
