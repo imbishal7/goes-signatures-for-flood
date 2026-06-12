@@ -65,7 +65,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 from shapely.geometry import shape
 from shapely.ops import unary_union
@@ -133,7 +132,8 @@ STORM_DETAIL_COLS = [
     "EPISODE_ID", "EVENT_ID", "STATE", "EVENT_TYPE", "CZ_TYPE", "CZ_NAME",
     "WFO", "BEGIN_DATE_TIME", "CZ_TIMEZONE", "END_DATE_TIME",
     "INJURIES_DIRECT", "DEATHS_DIRECT", "DAMAGE_PROPERTY", "DAMAGE_CROPS",
-    "SOURCE", "FLOOD_CAUSE", "BEGIN_LAT", "BEGIN_LON", "EVENT_NARRATIVE",
+    "SOURCE", "FLOOD_CAUSE", "BEGIN_LAT", "BEGIN_LON", "END_LAT", "END_LON",
+    "EVENT_NARRATIVE",
 ]
 
 
@@ -507,7 +507,14 @@ def _load_storm_year(
     paths: dict[tuple[str, int], Path],
     types: tuple[str, ...],
 ) -> pd.DataFrame | None:
-    """Flood events for one year, one row per (event, location point)."""
+    """Flood events for one year, one row per (event, point).
+
+    An event's points are the locations-table entries (point_index 1..N,
+    geom_source "locations") plus its BEGIN (point_index 0, "begin_latlon")
+    and END (point_index -1, "end_latlon") coordinates — deduplicated on
+    ~10 m-rounded coords, locations winning. Together they delineate the
+    event's spatial span (BEGIN/END differ for ~99.9% of flood events).
+    """
     if ("details", year) not in paths:
         return None
     d = pd.read_csv(paths[("details", year)], usecols=STORM_DETAIL_COLS,
@@ -520,22 +527,34 @@ def _load_storm_year(
     d["damage_property_usd"] = _damage_usd(d["DAMAGE_PROPERTY"])
     d["damage_crops_usd"] = _damage_usd(d["DAMAGE_CROPS"])
 
-    # precise points where the locations table has them; BEGIN_LAT/LON fallback
+    pieces: list[pd.DataFrame] = []
     if ("locations", year) in paths:
         locs = pd.read_csv(
             paths[("locations", year)],
             usecols=["EVENT_ID", "LOCATION_INDEX", "LATITUDE", "LONGITUDE"],
-        )
-        m = d.merge(locs, on="EVENT_ID", how="left")
-    else:
-        m = d.assign(LOCATION_INDEX=np.nan, LATITUDE=np.nan, LONGITUDE=np.nan)
-    fallback = m["LATITUDE"].isna()
-    m.loc[fallback, "LATITUDE"] = m.loc[fallback, "BEGIN_LAT"]
-    m.loc[fallback, "LONGITUDE"] = m.loc[fallback, "BEGIN_LON"]
-    m["geom_source"] = np.select(
-        [~fallback, m["LATITUDE"].notna()], ["locations", "begin_latlon"],
-        default="none",
-    )
+        ).rename(columns={"LOCATION_INDEX": "point_index",
+                          "LATITUDE": "lat", "LONGITUDE": "lon"})
+        locs = locs[locs["EVENT_ID"].isin(d["EVENT_ID"])].dropna(
+            subset=["lat", "lon"])
+        locs["geom_source"] = "locations"
+        pieces.append(locs)
+    for src, lat_col, lon_col, idx in (
+        ("begin_latlon", "BEGIN_LAT", "BEGIN_LON", 0),
+        ("end_latlon", "END_LAT", "END_LON", -1),
+    ):
+        p = (d[["EVENT_ID", lat_col, lon_col]]
+             .rename(columns={lat_col: "lat", lon_col: "lon"})
+             .dropna(subset=["lat", "lon"]))
+        p["point_index"] = idx
+        p["geom_source"] = src
+        pieces.append(p)
+    pts = pd.concat(pieces, ignore_index=True)
+    pts["lat4"], pts["lon4"] = pts["lat"].round(4), pts["lon"].round(4)
+    pts = (pts.drop_duplicates(["EVENT_ID", "lat4", "lon4"])   # locations win
+              .drop(columns=["lat4", "lon4"]))
+
+    m = d.merge(pts, on="EVENT_ID", how="left")    # left: keep point-less events
+    m["geom_source"] = m["geom_source"].fillna("none")
 
     return pd.DataFrame({
         "event_id": m["EVENT_ID"],
@@ -548,9 +567,9 @@ def _load_storm_year(
         "wfo": m["WFO"],
         "begin_utc": m["begin_utc"],
         "end_utc": m["end_utc"],
-        "lat": m["LATITUDE"].astype("float32"),
-        "lon": m["LONGITUDE"].astype("float32"),
-        "point_index": m["LOCATION_INDEX"].fillna(0).astype("int16"),
+        "lat": m["lat"].astype("float32"),
+        "lon": m["lon"].astype("float32"),
+        "point_index": m["point_index"].fillna(0).astype("int16"),
         "geom_source": m["geom_source"],
         "injuries_direct": m["INJURIES_DIRECT"].astype("int32"),
         "deaths_direct": m["DEATHS_DIRECT"].astype("int32"),

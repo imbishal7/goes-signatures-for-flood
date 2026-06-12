@@ -6,7 +6,8 @@ A research project that uses GOES-16 and GOES-19 satellite imagery (ABI-L2-MCMIP
 > focus is exploratory: watching a day's GOES cloud time-lapse over CONUS against the
 > *next day's* flood polygons on one interactive map, to see whether cloud and
 > moisture movement lines up with where extreme flooding appears. Three flood
-> ground-truth layers back this up: observed flood extents (**groundsource**),
+> ground-truth layers back this up: flood extents from news reports
+> (**groundsource**, Google Research's Gemini-extracted dataset),
 > NWS flood **warnings** (flash-flood + areal-flood, forecaster-issued), and
 > NCEI **storm events** — human-confirmed flood *occurrences* (points with UTC
 > times, impacts, and narratives, reported by emergency managers, gauges, law
@@ -28,7 +29,7 @@ goes-signatures-for-flood/
 │   │   ├── goes_data_explore.ipynb   # GOES imagery: disk inventory, bands, single-frame map
 │   │   ├── flood_data_explore.ipynb  # groundsource + warnings; builds floods_unified.parquet
 │   │   └── glm_data_explore.ipynb    # GLM flashes: availability, daily counts, density
-│   └── clouds_vs_floods.ipynb        # combined overlay + time-lapse (clouds, floods, lightning)
+│   └── goes_vs_floods.ipynb        # combined overlay + time-lapse (clouds, floods, lightning)
 ├── src/
 │   ├── download_goes.py            # GOES download script (CLI + importable module)
 │   ├── download_flood_data.py      # ALL flood ground truth: groundsource + warnings + storm events
@@ -100,7 +101,7 @@ The three layers differ in nature — keep that in mind when using them as label
 
 | layer | what it is | geometry | time resolution |
 |---|---|---|---|
-| groundsource | remotely-sensed flood *extents* | polygons | day (start/end date) |
+| groundsource | flood events from news reports ([Google Research](https://zenodo.org/records/18647054)) | polygons | day (start/end date) |
 | warnings | forecaster-issued *predictions* | polygons | minute (issue/expire) |
 | storm events | human-confirmed *occurrences* with impacts | points | minute (UTC begin/end) |
 
@@ -187,7 +188,7 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 3. **Explore** — the `notebooks/explore/` notebooks summarize each dataset;
    `flood_data_explore.ipynb` (re)builds the unified parquet and cross-checks the
    flood layers against each other.
-4. **Compare** — `clouds_vs_floods.ipynb` overlays the GOES time-lapse, the 25 km
+4. **Compare** — `goes_vs_floods.ipynb` overlays the GOES time-lapse, the 25 km
    CONUS grid, and the next-day floods on one interactive map.
 
 ## Notebooks
@@ -199,7 +200,7 @@ Launch with `uv run jupyter lab`.
 | [notebooks/explore/flood_data_explore.ipynb](notebooks/explore/flood_data_explore.ipynb) | Load and summarize the flood layers (groundsource extents + NWS FF/FA warnings), build the harmonized `floods_unified.parquet`, and verify warnings against observations (per-warning verification + a 25 km cell-day classification report) |
 | [notebooks/explore/goes_data_explore.ipynb](notebooks/explore/goes_data_explore.ipynb) | Explore downloaded GOES imagery: disk inventory, pick a date/file, view any band or a true-color RGB, overlay a frame on an interactive folium map, crop to a region |
 | [notebooks/explore/glm_data_explore.ipynb](notebooks/explore/glm_data_explore.ipynb) | Explore GLM lightning flashes: days built so far, flashes/day time series, one day in detail (stats, diurnal cycle, spatial density) |
-| [notebooks/clouds_vs_floods.ipynb](notebooks/clouds_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a 25 km CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
+| [notebooks/goes_vs_floods.ipynb](notebooks/goes_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a 25 km CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
 | [notebooks/unet_convlstm_plan.ipynb](notebooks/unet_convlstm_plan.ipynb) | Architecture sketch for the planned U-Net ConvLSTM model (visualkeras diagrams, size/memory estimates, training plan) |
 
 ## Band Reference

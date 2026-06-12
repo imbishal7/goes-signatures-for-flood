@@ -63,8 +63,10 @@ prediction vs. confirmed occurrence — so keep them distinct when labeling:
 
 1. **groundsource** — `data/raw/groundsource_2026.parquet` (~637 MB). ~2.65M rows,
    columns: `uuid`, `area_km2`, `geometry` (WKB polygons/multipolygons),
-   `start_date`, `end_date` (strings, day resolution). Remotely-sensed flood
-   *extents*. Source: Zenodo record 18647054.
+   `start_date`, `end_date` (strings, day resolution). **Google Research's
+   "Groundsource" dataset**: flood events extracted from local news reports
+   (Gemini-extracted, 80 languages — NOT remote sensing). Source: Zenodo
+   record 18647054.
 2. **NWS warnings** — `data/flood_warnings/flood_warnings_conus.parquet` (~6 MB).
    ~40k forecaster-issued Flash Flood (FF) + Areal Flood (FA) *Warning* polygons,
    CONUS 2019-on, minute-resolution issue/expire. Source: IEM VTEC services.
@@ -105,7 +107,7 @@ src/download_glm.py              # GLM lightning flashes -> one parquet/day (/mn
 notebooks/explore/goes_data_explore.ipynb   # GOES imagery alone: inventory, bands, single-frame map
 notebooks/explore/flood_data_explore.ipynb  # groundsource + warnings; builds floods_unified.parquet
 notebooks/explore/glm_data_explore.ipynb    # GLM flashes alone: availability, daily counts, density
-notebooks/clouds_vs_floods.ipynb            # combined overlay + synced time-lapse (clouds, floods, lightning)
+notebooks/goes_vs_floods.ipynb            # combined overlay + synced time-lapse (clouds, floods, lightning)
 data/raw/                        # groundsource parquet (large data gitignored)
 data/flood_warnings/             # warning polygons + unified flood frame (gitignored)
 data/storm_events/               # NCEI storm-events flood parquet + raw csv.gz cache
