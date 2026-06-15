@@ -107,7 +107,10 @@ src/download_glm.py              # GLM lightning flashes -> one parquet/day (/mn
 notebooks/explore/goes_data_explore.ipynb   # GOES imagery alone: inventory, bands, single-frame map
 notebooks/explore/flood_data_explore.ipynb  # groundsource + warnings; builds floods_unified.parquet
 notebooks/explore/glm_data_explore.ipynb    # GLM flashes alone: availability, daily counts, density
-notebooks/goes_vs_floods.ipynb            # combined overlay + synced time-lapse (clouds, floods, lightning)
+notebooks/explore/goes_vs_floods.ipynb      # combined overlay + synced time-lapse (clouds, floods, lightning)
+notebooks/model/01_prepare_data.ipynb       # build model inputs/outputs + materialize the sample cache
+notebooks/model/02_train_model.ipynb        # FloodConvLSTM: cache -> DDP train/val/test (Tversky loss)
+notebooks/model/03_visualize_model.ipynb    # visualize the model (torchinfo / diagram / torchview graph)
 data/raw/                        # groundsource parquet (large data gitignored)
 data/flood_warnings/             # warning polygons + unified flood frame (gitignored)
 data/storm_events/               # NCEI storm-events flood parquet + raw csv.gz cache

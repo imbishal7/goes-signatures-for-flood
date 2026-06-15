@@ -28,8 +28,12 @@ goes-signatures-for-flood/
 │   ├── explore/
 │   │   ├── goes_data_explore.ipynb   # GOES imagery: disk inventory, bands, single-frame map
 │   │   ├── flood_data_explore.ipynb  # groundsource + warnings; builds floods_unified.parquet
-│   │   └── glm_data_explore.ipynb    # GLM flashes: availability, daily counts, density
-│   └── goes_vs_floods.ipynb        # combined overlay + time-lapse (clouds, floods, lightning)
+│   │   ├── glm_data_explore.ipynb    # GLM flashes: availability, daily counts, density
+│   │   └── goes_vs_floods.ipynb      # combined overlay + time-lapse (clouds, floods, lightning)
+│   └── model/
+│       ├── 01_prepare_data.ipynb     # build model inputs/outputs + materialize the sample cache
+│       ├── 02_train_model.ipynb      # FloodConvLSTM: DDP train/val/test (Tversky loss)
+│       └── 03_visualize_model.ipynb  # visualize the model (torchinfo / diagram / graph)
 ├── src/
 │   ├── download_goes.py            # GOES download script (CLI + importable module)
 │   ├── download_flood_data.py      # ALL flood ground truth: groundsource + warnings + storm events
@@ -188,8 +192,11 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 3. **Explore** — the `notebooks/explore/` notebooks summarize each dataset;
    `flood_data_explore.ipynb` (re)builds the unified parquet and cross-checks the
    flood layers against each other.
-4. **Compare** — `goes_vs_floods.ipynb` overlays the GOES time-lapse, the 25 km
+4. **Compare** — `explore/goes_vs_floods.ipynb` overlays the GOES time-lapse, the
    CONUS grid, and the next-day floods on one interactive map.
+5. **Model** — the `notebooks/model/` pipeline: `01_prepare_data` builds the
+   sample cache, `02_train_model` trains the FloodConvLSTM, `03_visualize_model`
+   inspects it.
 
 ## Notebooks
 
@@ -200,8 +207,10 @@ Launch with `uv run jupyter lab`.
 | [notebooks/explore/flood_data_explore.ipynb](notebooks/explore/flood_data_explore.ipynb) | Load and summarize the flood layers (groundsource extents + NWS FF/FA warnings), build the harmonized `floods_unified.parquet`, and verify warnings against observations (per-warning verification + a 25 km cell-day classification report) |
 | [notebooks/explore/goes_data_explore.ipynb](notebooks/explore/goes_data_explore.ipynb) | Explore downloaded GOES imagery: disk inventory, pick a date/file, view any band or a true-color RGB, overlay a frame on an interactive folium map, crop to a region |
 | [notebooks/explore/glm_data_explore.ipynb](notebooks/explore/glm_data_explore.ipynb) | Explore GLM lightning flashes: days built so far, flashes/day time series, one day in detail (stats, diurnal cycle, spatial density) |
-| [notebooks/goes_vs_floods.ipynb](notebooks/goes_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a 25 km CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
-| [notebooks/unet_convlstm_plan.ipynb](notebooks/unet_convlstm_plan.ipynb) | Architecture sketch for the planned U-Net ConvLSTM model (visualkeras diagrams, size/memory estimates, training plan) |
+| [notebooks/explore/goes_vs_floods.ipynb](notebooks/explore/goes_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
+| [notebooks/model/01_prepare_data.ipynb](notebooks/model/01_prepare_data.ipynb) | Build the model's inputs (prev-day GOES bands + whole-day GLM map) and outputs (next-day flood map on the 50 km grid), printing every shape, then materialize a fast on-disk sample cache |
+| [notebooks/model/02_train_model.ipynb](notebooks/model/02_train_model.ipynb) | Train the `FloodConvLSTM` (encoder → ConvLSTM → exact pixel→cell pooling → grid head) on the cache with a recall-weighted Tversky loss, DDP across both GPUs; train/val/test + metrics |
+| [notebooks/model/03_visualize_model.ipynb](notebooks/model/03_visualize_model.ipynb) | Visualize the model: `torchinfo` layer summary, an architecture diagram, a real input→output example, and the `torchview` computation graph |
 
 ## Band Reference
 
