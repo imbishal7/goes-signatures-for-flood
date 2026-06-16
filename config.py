@@ -33,13 +33,23 @@ YEAR = 2019
 BANDS = (1, 2, 3, 6, 13, 16)
 N_BAND = len(BANDS)
 
-# include the whole-day GLM flash-density map as one extra input channel
-# (broadcast across the T frames). The _glm.npy files are always cached, so this
-# can be flipped without rebuilding the cache.
-USE_GLM = True
-N_CH = N_BAND + (1 if USE_GLM else 0)             # model input channels per frame
+# per-frame GOES channels: the 6 bands, optionally + a per-frame lead-time channel
+#   USE_TIME — append each frame's lead time (hours before day D's CST start,
+#              from _t.npy) as one extra channel, so the model knows how far ahead
+#              of the flood each frame sits.
+USE_TIME = True
+N_CH = N_BAND + (1 if USE_TIME else 0)            # GOES channels per frame (= 7)
 T_FRAMES = 6                                      # daytime frames/day (16-21 UTC)
 IMG_H, IMG_W = 1500, 2500                         # ABI CONUS 2 km grid (rows, cols)
+
+# GLM lightning (DEFERRED): a SEPARATE input stream (not a GOES channel) — the
+# full input day binned into GLM_HOURS hourly maps on the CELL_KM grid, GLM_FEATS
+# features each [flash count, total energy, total area], plus per-hour lead times.
+# Not built in nb1 and excluded from the model for now (the `area` feature is
+# mis-scaled at the source for ~Jan 2019); constants kept for when we re-add it.
+USE_GLM = False
+GLM_HOURS = 24
+GLM_FEATS = 3                                      # count, energy, area
 
 # >>> OUTPUT GRID SIZE LEVER <<<
 # Square output cells CELL_KM on a side, generated directly over CONUS land in
@@ -70,7 +80,7 @@ SPLIT_FRACS = (0.70, 0.20, 0.10)                  # train / val / test
 # Training hyper-parameters — notebook 02
 # ---------------------------------------------------------------------------
 BATCH_PER_GPU = 1
-EPOCHS = 5
+EPOCHS = 2
 LR = 3e-4
 WORKERS = 8
 
@@ -145,3 +155,28 @@ def build_grid_cells():
     land_mask[grid["R"], grid["C"]] = True
     return (grid.to_crs(4326)[["R", "C", "cell_id", "geometry"]],
             grid_r, grid_c, land_mask)
+
+
+def grid_transform():
+    """Albers geo-transform of the CELL_KM grid: (x0, y0, step, grid_r, grid_c).
+
+    The same lattice ``build_grid_cells`` lays down, returned as numbers so
+    points (e.g. GLM flashes) can be binned to cells by integer division
+    instead of an expensive point-in-polygon join. ``x0``/``y0`` are the SW
+    corner in EPSG:5070 metres; a point at Albers (x, y) falls in
+    ``C = floor((x-x0)/step)``, ``R = grid_r-1 - floor((y-y0)/step)`` (north-up).
+    """
+    import geopandas as gpd
+    import numpy as np
+
+    if not STATES_GEOJSON.exists():
+        build_grid_cells()                            # triggers the one-time download
+    states = gpd.read_file(STATES_GEOJSON)
+    land = states[~states["name"].isin(_NON_CONUS)].to_crs(_ALBERS)
+    step = CELL_KM * 1000.0
+    minx, miny, maxx, maxy = land.total_bounds
+    x0 = float(np.floor(minx / step) * step)
+    y0 = float(np.floor(miny / step) * step)
+    grid_c = len(np.arange(x0, maxx + step, step))
+    grid_r = len(np.arange(y0, maxy + step, step))
+    return x0, y0, step, grid_r, grid_c
