@@ -26,9 +26,6 @@ memory-shy code by default.
 | GPU | **2× NVIDIA RTX PRO 6000 Blackwell** (Max-Q Workstation Edition), **~96 GB VRAM each** (~192 GB total) |
 | Storage | **~10 TB across separate drives** (see below) |
 
-> Note: the CPU is 64 *cores* with SMT giving 128 *threads* (the OS reports 128
-> logical CPUs). Both GPUs report ~96 GB VRAM, so multi-GPU and large-batch /
-> large-model workloads are very feasible.
 
 Practical defaults:
 - Parallelize across cores (e.g. `ProcessPoolExecutor`, `joblib`, Dask, or library
@@ -109,8 +106,7 @@ notebooks/explore/flood_data_explore.ipynb  # groundsource + warnings; builds fl
 notebooks/explore/glm_data_explore.ipynb    # GLM flashes alone: availability, daily counts, density
 notebooks/explore/goes_vs_floods.ipynb      # combined overlay + synced time-lapse (clouds, floods, lightning)
 notebooks/model/01_prepare_data.ipynb       # build model inputs/outputs + materialize the sample cache
-notebooks/model/02_train_model.ipynb        # FloodConvLSTM: cache -> DDP train/val/test (Tversky loss)
-notebooks/model/03_visualize_model.ipynb    # visualize the model (torchinfo / diagram / torchview graph)
+notebooks/model/02_train_model.ipynb        # ConvLSTM: cache -> DDP train/val/test (Tversky loss)
 data/raw/                        # groundsource parquet (large data gitignored)
 data/flood_warnings/             # warning polygons + unified flood frame (gitignored)
 data/storm_events/               # NCEI storm-events flood parquet + raw csv.gz cache

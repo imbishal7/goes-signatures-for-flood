@@ -27,10 +27,17 @@ UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
 # ---------------------------------------------------------------------------
 YEAR = 2019
 
-# GOES inputs: 6 ABI bands chosen to work day AND night, + 1 GLM channel
-BANDS = (2, 6, 8, 10, 13, 16)
+# GOES inputs: 3 visible/near-IR "colour" bands + 3 cloud-property bands
+#   1 blue, 2 red, 3 near-IR veggie | 6 cloud particle size,
+#   13 clean-IR cloud-top temp, 16 CO2 cloud-top height.
+BANDS = (1, 2, 3, 6, 13, 16)
 N_BAND = len(BANDS)
-N_CH = N_BAND + 1                                 # bands + whole-day GLM map
+
+# include the whole-day GLM flash-density map as one extra input channel
+# (broadcast across the T frames). The _glm.npy files are always cached, so this
+# can be flipped without rebuilding the cache.
+USE_GLM = True
+N_CH = N_BAND + (1 if USE_GLM else 0)             # model input channels per frame
 T_FRAMES = 6                                      # daytime frames/day (16-21 UTC)
 IMG_H, IMG_W = 1500, 2500                         # ABI CONUS 2 km grid (rows, cols)
 
@@ -39,7 +46,9 @@ IMG_H, IMG_W = 1500, 2500                         # ABI CONUS 2 km grid (rows, c
 # an equal-area projection (see build_grid_cells). Any size works: 50, 40, 75...
 CELL_KM = 50
 
-# encoder downsample before pixel->cell pooling (notebook 02)
+# ---- model (notebook 02) ----
+# A shared per-frame conv encoder downsamples to IMG // POOL_STRIDE, a ConvLSTM
+# fuses the T frames, then pixel->cell pooling maps onto the CELL_KM grid.
 POOL_STRIDE = 2
 
 # ---------------------------------------------------------------------------
@@ -57,7 +66,7 @@ CKPT_DIR = Path("/mnt/disk1/models/floodnet_convlstm")
 SPLIT_SEED = 0
 SPLIT_FRACS = (0.70, 0.20, 0.10)                  # train / val / test
 
-# ---------------------------------masked------------------------------------
+# ---------------------------------------------------------------------------
 # Training hyper-parameters — notebook 02
 # ---------------------------------------------------------------------------
 BATCH_PER_GPU = 1
@@ -66,15 +75,16 @@ LR = 3e-4
 WORKERS = 8
 
 # ---------------------------------------------------------------------------
-# Loss — Tversky (Dice family) on a neighborhood-tolerant target
+# Loss & metrics — Tversky (soft IoU/F1) on hard 0/1 targets
 # ---------------------------------------------------------------------------
-# alpha weights false positives, beta weights false negatives; beta > alpha
-# favors recall (don't miss floods). NEIGHBOR_W gives a flooded cell's 1st-ring
-# neighbours a soft target of this weight, so predicting a neighbour is partial
-# credit (your 1 / 0.5 / 0 scheme). Set NEIGHBOR_W = 0 for hard 0/1 targets.
-TVERSKY_ALPHA = 0.3
-TVERSKY_BETA = 0.7
-NEIGHBOR_W = 0.5
+# loss = 1 - TP / (TP + ALPHA*FP + BETA*FN), over the land cells.
+#   ALPHA weights false positives, BETA weights false negatives:
+#     ALPHA > BETA -> penalize over-prediction (precision-favoring)  [current]
+#     ALPHA = BETA -> Dice loss
+#     ALPHA < BETA -> favor recall (catch more, risk over-prediction)
+TVERSKY_ALPHA = 0.7
+TVERSKY_BETA = 0.3
+PRED_THRESHOLD = 0.5     # decision threshold for the binary val metrics (F1/IoU/...)
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +106,8 @@ def build_grid_cells():
     + DC, from STATES_GEOJSON — downloaded once if missing). Nothing is stored.
 
     Returns
-        cells      GeoDataFrame[R, C, geometry] in EPSG:4326 (row 0 = north,
-                   col 0 = west — matching the GOES imagery orientation).
+        cells      GeoDataFrame[R, C, cell_id, geometry] in EPSG:4326 (row 0 =
+                   north, col 0 = west — matching the GOES imagery orientation).
         grid_r,    grid_c : int grid dimensions.
         land_mask  (grid_r, grid_c) bool — cells intersecting land.
     """
@@ -128,7 +138,10 @@ def build_grid_cells():
                          "geometry": box(x0, y0, x0 + step, y0 + step)})
     grid = gpd.GeoDataFrame(recs, crs=_ALBERS)
     grid = grid[grid.intersects(land_union)].reset_index(drop=True)
+    grid["cell_id"] = ("r" + grid["R"].map("{:03d}".format)
+                       + "c" + grid["C"].map("{:03d}".format))
 
     land_mask = np.zeros((grid_r, grid_c), dtype=bool)
     land_mask[grid["R"], grid["C"]] = True
-    return grid.to_crs(4326)[["R", "C", "geometry"]], grid_r, grid_c, land_mask
+    return (grid.to_crs(4326)[["R", "C", "cell_id", "geometry"]],
+            grid_r, grid_c, land_mask)

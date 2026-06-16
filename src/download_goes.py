@@ -42,17 +42,20 @@ PRODUCT = "ABI-L2-MCMIPC"
 GOES16_END_DATE = date(2025, 4, 6)
 GOES19_START_DATE = date(2025, 4, 7)
 
-# 6 daytime images/day, centered on CONUS solar noon (~18-19 UTC) for max daylight
-DEFAULT_TARGET_HOURS = [16, 17, 18, 19, 20, 21]
+# 8 images per CST day at 3-hour gaps (00, 03, ..., 21 CST). GOES files are
+# UTC-named and CST = UTC-6 (DST ignored); since 6 h is a multiple of the 3 h
+# gap, the UTC target hours are the same 8 values 00..21.
+DEFAULT_TARGET_HOURS = [0, 3, 6, 9, 12, 15, 18, 21]
 TYPICAL_FILE_SIZE_MB = 60.0   # verified: 57–61 MB per file
 
-# DEFAULT_START = date(2019, 1, 1)
-# DEFAULT_END = date(2026, 2, 28)
+# default full span; override per run with --start / --end
+DEFAULT_START = date(2019, 1, 1)
+DEFAULT_END = date(2026, 6, 10)
 
-DEFAULT_START = date(2026, 2, 28)
-DEFAULT_END = date(2026, 6, 9)
-
-DEFAULT_DATA_DIR = Path("/mnt/disk1/goes-data")
+# NOTE: downloads default to /mnt/disk4 (overflow). The model pipeline reads GOES
+# from /mnt/disk1/goes-data (config.DATA_DIR) — pass --data-dir to match, or
+# move/symlink, so the notebooks find what you pull here.
+DEFAULT_DATA_DIR = Path("/mnt/disk4/goes-data")
 DEFAULT_WORKERS = 25           # saturates 100 MB/s with ~60 MB files
 
 
@@ -241,15 +244,16 @@ def estimate_storage(
     print()
 
     if images_per_day == 1:
-        print("--- 6 images/day estimate ---")
+        n = len(DEFAULT_TARGET_HOURS)
+        print(f"--- {n} images/day estimate ---")
         print(
-            f"{'Files':20s} {goes16_days * 6:>10,}"
-            f" {goes19_days * 6:>10,} {total_days * 6:>10,}"
+            f"{'Files':20s} {goes16_days * n:>10,}"
+            f" {goes19_days * n:>10,} {total_days * n:>10,}"
         )
         print(
-            f"{'Storage':20s} {gb(goes16_days) * 6:>9.1f}G"
-            f" {gb(goes19_days) * 6:>9.1f}G"
-            f" {gb(total_days) * 6:>9.1f}G"
+            f"{'Storage':20s} {gb(goes16_days) * n:>9.1f}G"
+            f" {gb(goes19_days) * n:>9.1f}G"
+            f" {gb(total_days) * n:>9.1f}G"
         )
         print()
 
@@ -351,7 +355,7 @@ def download_date_range(
 
     Uses GOES-16 through 2025-04-06, GOES-19 from 2025-04-07 onward.
     Skips already-downloaded files (idempotent re-runs).
-    Defaults to 6 daytime images/day; pass target_hours=[18] for a single image.
+    Defaults to 8 images per CST day (3-hour gaps); pass target_hours=[18] for one.
     Workers run in threads — boto3 clients are thread-safe.
     With dry_run=True, nothing is fetched; it lists every file and reports the
     exact total download size from real S3 object sizes.
@@ -448,7 +452,7 @@ def parse_args() -> argparse.Namespace:
         "--hour", type=int, nargs="+", default=DEFAULT_TARGET_HOURS, metavar="H",
         help=(
             f"UTC hour(s) to target (default: {DEFAULT_TARGET_HOURS}, "
-            "6 daytime images/day). Pass one for 1/day, e.g. --hour 18"
+            "8 images per CST day at 3-hour gaps). Pass one for 1/day, e.g. --hour 18"
         ),
     )
     dl.add_argument(

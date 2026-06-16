@@ -32,8 +32,7 @@ goes-signatures-for-flood/
 │   │   └── goes_vs_floods.ipynb      # combined overlay + time-lapse (clouds, floods, lightning)
 │   └── model/
 │       ├── 01_prepare_data.ipynb     # build model inputs/outputs + materialize the sample cache
-│       ├── 02_train_model.ipynb      # FloodConvLSTM: DDP train/val/test (Tversky loss)
-│       └── 03_visualize_model.ipynb  # visualize the model (torchinfo / diagram / graph)
+│       └── 02_train_model.ipynb      # ConvLSTM: DDP train/val/test (Tversky loss)
 ├── src/
 │   ├── download_goes.py            # GOES download script (CLI + importable module)
 │   ├── download_flood_data.py      # ALL flood ground truth: groundsource + warnings + storm events
@@ -195,8 +194,7 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 4. **Compare** — `explore/goes_vs_floods.ipynb` overlays the GOES time-lapse, the
    CONUS grid, and the next-day floods on one interactive map.
 5. **Model** — the `notebooks/model/` pipeline: `01_prepare_data` builds the
-   sample cache, `02_train_model` trains the FloodConvLSTM, `03_visualize_model`
-   inspects it.
+   sample cache and `02_train_model` trains the ConvLSTM.
 
 ## Notebooks
 
@@ -208,9 +206,8 @@ Launch with `uv run jupyter lab`.
 | [notebooks/explore/goes_data_explore.ipynb](notebooks/explore/goes_data_explore.ipynb) | Explore downloaded GOES imagery: disk inventory, pick a date/file, view any band or a true-color RGB, overlay a frame on an interactive folium map, crop to a region |
 | [notebooks/explore/glm_data_explore.ipynb](notebooks/explore/glm_data_explore.ipynb) | Explore GLM lightning flashes: days built so far, flashes/day time series, one day in detail (stats, diurnal cycle, spatial density) |
 | [notebooks/explore/goes_vs_floods.ipynb](notebooks/explore/goes_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
-| [notebooks/model/01_prepare_data.ipynb](notebooks/model/01_prepare_data.ipynb) | Build the model's inputs (prev-day GOES bands + whole-day GLM map) and outputs (next-day flood map on the 50 km grid), printing every shape, then materialize a fast on-disk sample cache |
-| [notebooks/model/02_train_model.ipynb](notebooks/model/02_train_model.ipynb) | Train the `FloodConvLSTM` (encoder → ConvLSTM → exact pixel→cell pooling → grid head) on the cache with a recall-weighted Tversky loss, DDP across both GPUs; train/val/test + metrics |
-| [notebooks/model/03_visualize_model.ipynb](notebooks/model/03_visualize_model.ipynb) | Visualize the model: `torchinfo` layer summary, an architecture diagram, a real input→output example, and the `torchview` computation graph |
+| [notebooks/model/01_prepare_data.ipynb](notebooks/model/01_prepare_data.ipynb) | Build the model's inputs (prev-day GOES 16-band sequence; GLM cached but currently unused) and outputs (next-day flood map on the 50 km grid), printing every shape, then materialize a fast on-disk sample cache |
+| [notebooks/model/02_train_model.ipynb](notebooks/model/02_train_model.ipynb) | Train the `FloodConvLSTM` (conv encoder → ConvLSTM → exact pixel→cell pooling → head) on the cache with a Tversky loss (α>β, precision-favoring) and binary metrics (F1/IoU), DDP across both GPUs; train/val/test |
 
 ## Band Reference
 
