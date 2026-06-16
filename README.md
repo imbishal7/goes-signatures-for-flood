@@ -1,19 +1,13 @@
 # GOES Signatures for Flood Prediction
 
-A research project that uses GOES-16 and GOES-19 satellite imagery (ABI-L2-MCMIPC) to identify spectral signatures associated with flood events across the contiguous United States (CONUS).
+A research project that uses **GOES satellite imagery** and **GLM lightning data**
+to predict **hazardous flooding conditions across the United States** on a
+**50 × 50 km grid**.
 
-> **Status: early research — the prediction target is not finalized.** The current
-> focus is exploratory: watching a day's GOES cloud time-lapse over CONUS against the
-> *next day's* flood polygons on one interactive map, to see whether cloud and
-> moisture movement lines up with where extreme flooding appears. Three flood
-> ground-truth layers back this up: flood extents from news reports
-> (**groundsource**, Google Research's Gemini-extracted dataset),
-> NWS flood **warnings** (flash-flood + areal-flood, forecaster-issued), and
-> NCEI **storm events** — human-confirmed flood *occurrences* (points with UTC
-> times, impacts, and narratives, reported by emergency managers, gauges, law
-> enforcement, the public, ...). Groundsource + warnings are merged into a single
-> unified parquet; storm events are the independent "a flood really happened
-> here" check.
+From a day's GOES + GLM observations, the model predicts **which grid cells face
+hazardous flooding the next day** over the contiguous US (CONUS). Ground truth
+comes from three flood layers (detailed below): news-report extents
+(**groundsource**), NWS flood **warnings**, and NCEI **storm events**.
 
 ## Project Structure
 

@@ -42,5 +42,8 @@ Thumbs.db
 # Logs
 *.log
 
+# Local Claude Code guidance (not tracked)
+CLAUDE.md
+
 # large generated sample cache (notebook 01) — kept on the project NVMe, never committed
 /cache/
