@@ -27,10 +27,22 @@ UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
 # ---------------------------------------------------------------------------
 YEAR = 2019
 
-# GOES inputs: 3 visible/near-IR "colour" bands + 3 cloud-property bands
-#   1 blue, 2 red, 3 near-IR veggie | 6 cloud particle size,
-#   13 clean-IR cloud-top temp, 16 CO2 cloud-top height.
-BANDS = (1, 2, 3, 6, 13, 16)
+# GOES inputs: 6 ABI bands spanning 5 distinct physical channels, chosen by the
+# all-16-band signal diagnosis (notebooks/model/00b_band_signal.ipynb) against the
+# storm-event target. Each one is non-redundant — we deliberately avoid stacking
+# near-duplicate bands:
+#    2  red 0.64um        -> cloud albedo / thickness (one visible band is enough)
+#    3  veggie-NIR 0.86um -> vegetation vs standing-water contrast (surface signal)
+#    7  shortwave-win 3.9 -> low cloud + warm surface by day (top-ranked, non-redundant)
+#   10  low water-vapour 7.3 -> low/mid-trop moisture = the fuel for heavy rain (3.8x lift)
+#   13  clean-IR 10.3um   -> cloud-top temperature = convective intensity
+#   16  CO2 13.3um        -> cloud-top height = tall-cloud / deep-convection signal
+# Dropped vs the old set (1,2,3,6,13,16): band 1 (blue) was a near-duplicate of
+# band 2 (both visible reflectance), and band 6 (2.24um cloud-size) was the weakest
+# of all 16. Their slots went to the two missing physical signals: shortwave (7) and
+# water vapour (10). Net effect is modest (~+2% PR-AUC) — band choice is a
+# second-order knob; the per-cell location prior is the real lever.
+BANDS = (2, 3, 7, 10, 13, 16)
 N_BAND = len(BANDS)
 
 # per-frame GOES channels: the 6 bands, optionally + a per-frame lead-time channel
@@ -79,7 +91,7 @@ SPLIT_FRACS = (0.70, 0.20, 0.10)                  # train / val / test
 # ---------------------------------------------------------------------------
 # Training hyper-parameters — notebook 02
 # ---------------------------------------------------------------------------
-BATCH_PER_GPU = 1
+BATCH_PER_GPU = 2                                 # at POOL_STRIDE=2 (finer /2 encoder grid, ~4x activation memory)
 EPOCHS = 2
 LR = 3e-4
 WORKERS = 8
@@ -89,11 +101,14 @@ WORKERS = 8
 # ---------------------------------------------------------------------------
 # loss = 1 - TP / (TP + ALPHA*FP + BETA*FN), over the land cells.
 #   ALPHA weights false positives, BETA weights false negatives:
-#     ALPHA > BETA -> penalize over-prediction (precision-favoring)  [current]
+#     ALPHA > BETA -> penalize over-prediction (precision-favoring)
 #     ALPHA = BETA -> Dice loss
-#     ALPHA < BETA -> favor recall (catch more, risk over-prediction)
-TVERSKY_ALPHA = 0.7
-TVERSKY_BETA = 0.3
+#     ALPHA < BETA -> favor recall (catch more, risk over-prediction)  [current]
+# The target is extremely rare-positive (storm-event floods ~0.2% of land cells/day),
+# so a precision-favoring loss (ALPHA>BETA) collapses to predicting all-zero. We
+# favor RECALL (ALPHA<BETA) so the model actually fires on flood cells.
+TVERSKY_ALPHA = 0.3
+TVERSKY_BETA = 0.7
 PRED_THRESHOLD = 0.5     # decision threshold for the binary val metrics (F1/IoU/...)
 
 

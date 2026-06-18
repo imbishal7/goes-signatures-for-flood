@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 # repo-root config (single source of truth for paths/constants)
@@ -25,6 +26,7 @@ from config import (  # noqa: E402
     IMG_H,
     IMG_W,
     N_CH,
+    T_FRAMES,
     TVERSKY_ALPHA,
     TVERSKY_BETA,
     USE_TIME,
@@ -32,7 +34,7 @@ from config import (  # noqa: E402
     grid_transform,
 )
 
-POOL_STRIDE = 4                       # encoder spatial downsample (model knob)
+POOL_STRIDE = 2                       # encoder spatial downsample (model knob; 2 or 4)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +96,10 @@ def conv_block(cin, cout):
 
 
 class Encoder(nn.Module):
-    """Per-frame CNN: (B, N_CH, 1500, 2500) -> (B, 64, 375, 625), downsampled /4."""
+    """Per-frame CNN: (B, N_CH, 1500, 2500) -> (B, 64, H/POOL_STRIDE, W/POOL_STRIDE).
+
+    POOL_STRIDE maxpools (one for /2, two for /4) downsample to the encoder grid
+    that CellPool regrids from. Params are identical at either stride."""
     def __init__(self, cin=N_CH):
         super().__init__()
         self.b1 = conv_block(cin, 32)
@@ -105,7 +110,10 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         x = self.pool(self.b1(x))        # /2
-        x = self.pool(self.b2(x))        # /4
+        if POOL_STRIDE == 4:
+            x = self.pool(self.b2(x))    # /4
+        else:
+            x = self.b2(x)               # stay at /2
         return self.b3(x)                # refine
 
 
@@ -160,19 +168,113 @@ class CellPool(nn.Module):
         return out[:, :, :self.n].reshape(B, C, self.grid_r, self.grid_c)
 
 
-class FloodConvLSTM(nn.Module):
-    """encoder (per frame) -> ConvLSTM (time) -> CellPool (grid) -> head -> logits."""
-    def __init__(self, pix2cell_sub, grid_r, grid_c, cin=N_CH):
+# ---------------------------------------------------------------------------
+# Model-comparison architectures (notebook 02): three spatio-temporal backbones
+# that all share the CellPool regrid + a location head, so only the backbone
+# differs. Each maps x (B, T, N_CH, H, W) -> per-cell logits (B, R, C).
+# ---------------------------------------------------------------------------
+class LocHead(nn.Module):
+    """Pooled GOES features (+ learnable per-cell embedding) -> logits, plus an
+    additive per-cell logit bias seeded from the training climatology (so the
+    model starts at the real per-cell rate and refines)."""
+    def __init__(self, cin, grid_r, grid_c, clim, embed_dim=16):
+        super().__init__()
+        self.embed = nn.Parameter(torch.randn(embed_dim, grid_r, grid_c) * 0.01)
+        p = np.clip(clim.astype(np.float32), 1e-4, 1 - 1e-4)
+        self.bias = nn.Parameter(torch.from_numpy(np.log(p / (1 - p))))   # logit(rate)
+        self.head = nn.Sequential(conv_block(cin + embed_dim, 64), nn.Conv2d(64, 1, 1))
+
+    def forward(self, cell):                              # (B, cin, R, C)
+        B = cell.shape[0]
+        cell = torch.cat([cell, self.embed.unsqueeze(0).expand(B, -1, -1, -1)], 1)
+        return self.head(cell).squeeze(1) + self.bias    # (B, R, C)
+
+
+class ResBlock(nn.Module):
+    """3x3 -> 3x3 residual block (GroupNorm + ReLU); 1x1 skip on channel change."""
+    def __init__(self, cin, cout):
+        super().__init__()
+        self.c1 = nn.Conv2d(cin, cout, 3, padding=1, bias=False)
+        self.n1 = nn.GroupNorm(8, cout)
+        self.c2 = nn.Conv2d(cout, cout, 3, padding=1, bias=False)
+        self.n2 = nn.GroupNorm(8, cout)
+        self.skip = nn.Conv2d(cin, cout, 1, bias=False) if cin != cout else nn.Identity()
+
+    def forward(self, x):
+        h = F.relu(self.n1(self.c1(x)))
+        h = self.n2(self.c2(h))
+        return F.relu(h + self.skip(x))
+
+
+class ResNetEncoder(nn.Module):
+    """Stacked-frames ResNet: (B, T*N_CH, 1500, 2500) -> (B, 64, 375, 625) (/4)."""
+    def __init__(self, cin, cout=64):
+        super().__init__()
+        self.stem = nn.Sequential(nn.Conv2d(cin, 32, 3, padding=1, bias=False),
+                                  nn.GroupNorm(8, 32), nn.ReLU(inplace=True))
+        self.pool = nn.MaxPool2d(2)
+        self.r1 = ResBlock(32, 48)
+        self.r2 = ResBlock(48, cout)
+        self.r3 = ResBlock(cout, cout)
+        self.out_ch = cout
+
+    def forward(self, x):
+        x = self.pool(self.stem(x))      # /2
+        x = self.r1(x)
+        if POOL_STRIDE == 4:
+            x = self.pool(x)             # /4
+        return self.r3(self.r2(x))       # refine
+
+
+class ConvLSTMNet(nn.Module):
+    """Shared per-frame CNN -> ConvLSTM (spatial recurrence) -> CellPool -> LocHead."""
+    def __init__(self, pix2cell_sub, grid_r, grid_c, clim, cin=N_CH):
         super().__init__()
         self.encoder = Encoder(cin)
         self.convlstm = ConvLSTM(self.encoder.out_ch, ch=64)
         self.pool = CellPool(pix2cell_sub, grid_r, grid_c)
-        self.head = nn.Sequential(conv_block(64, 64), nn.Conv2d(64, 1, 1))
+        self.loc = LocHead(64, grid_r, grid_c, clim)
 
-    def forward(self, x):                                 # (B, T, C, H, W)
+    def forward(self, x):                                # (B, T, C, H, W)
         B, T = x.shape[:2]
-        feats = self.encoder(x.flatten(0, 1)).unflatten(0, (B, T))
-        return self.head(self.pool(self.convlstm(feats))).squeeze(1)   # (B, R, C)
+        f = self.encoder(x.flatten(0, 1)).unflatten(0, (B, T))   # (B, T, 64, h, w)
+        return self.loc(self.pool(self.convlstm(f)))             # (B, R, C)
+
+
+class CNNLSTMNet(nn.Module):
+    """Per-frame CNN -> pool each frame to cells -> per-cell LSTM over T -> LocHead."""
+    def __init__(self, pix2cell_sub, grid_r, grid_c, clim, cin=N_CH, hid=64):
+        super().__init__()
+        self.encoder = Encoder(cin)
+        self.pool = CellPool(pix2cell_sub, grid_r, grid_c)
+        self.lstm = nn.LSTM(self.encoder.out_ch, hid, batch_first=True)
+        self.loc = LocHead(hid, grid_r, grid_c, clim)
+
+    def forward(self, x):                                # (B, T, C, H, W)
+        B, T = x.shape[:2]
+        f = self.encoder(x.flatten(0, 1))                # (B*T, 64, h, w)
+        cell = self.pool(f).unflatten(0, (B, T))         # (B, T, 64, R, C)
+        _, _, C, R, Cg = cell.shape
+        seq = cell.permute(0, 3, 4, 1, 2).reshape(B * R * Cg, T, C)   # per-cell seq
+        out, _ = self.lstm(seq)                          # (B*R*C, T, hid)
+        last = out[:, -1].reshape(B, R, Cg, -1).permute(0, 3, 1, 2)   # (B, hid, R, C)
+        return self.loc(last)
+
+
+class ResNetNet(nn.Module):
+    """Stack T frames as channels -> ResNet -> CellPool -> LocHead (no recurrence)."""
+    def __init__(self, pix2cell_sub, grid_r, grid_c, clim, cin=N_CH):
+        super().__init__()
+        self.encoder = ResNetEncoder(cin * T_FRAMES, 64)
+        self.pool = CellPool(pix2cell_sub, grid_r, grid_c)
+        self.loc = LocHead(64, grid_r, grid_c, clim)
+
+    def forward(self, x):                                # (B, T, C, H, W)
+        B, T, C, H, W = x.shape
+        return self.loc(self.pool(self.encoder(x.reshape(B, T * C, H, W))))
+
+
+COMPARE_MODELS = {"convlstm": ConvLSTMNet, "cnnlstm": CNNLSTMNet, "resnet": ResNetNet}
 
 
 # ---------------------------------------------------------------------------
