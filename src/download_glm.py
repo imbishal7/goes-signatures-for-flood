@@ -50,8 +50,8 @@ PRODUCT = "GLM-L2-LCFA"
 GOES16_END_DATE = date(2025, 4, 6)
 
 # Default range matches the ABI/GOES download span (see download_goes.py).
-DEFAULT_START_DATE = date(2019, 1, 1)
-DEFAULT_END_DATE = date(2026, 6, 9)
+DEFAULT_START_DATE = date(2026, 6, 1)
+DEFAULT_END_DATE = date(2026, 6, 23)
 
 # Clip boxes (lon_min, lon_max, lat_min, lat_max); None = full disk.
 CLIP_BOXES: dict[str, tuple[float, float, float, float] | None] = {
@@ -71,8 +71,8 @@ FLASH_FIELDS: dict[str, str] = {
     "flash_quality_flag": "quality_flag",
 }
 
-DEFAULT_OUT_DIR = Path("/mnt/disk1/glm-data")
-DEFAULT_WORKERS = 64              # fetch+parse threads per day (network-bound)
+DEFAULT_OUT_DIR = Path("/mnt/disk4/recent-glm")
+DEFAULT_WORKERS = 32              # fetch+parse threads per day (network-bound)
 DEFAULT_DAY_WORKERS = 8          # days processed in parallel (range mode)
 
 _S3_XMLNS = "{http://s3.amazonaws.com/doc/2006-03-01/}"

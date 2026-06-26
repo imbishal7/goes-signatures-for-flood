@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 # ---------------------------------------------------------------------------
 # Storage — large data/artifacts live on /mnt/disk1 (see CLAUDE.md)
 # ---------------------------------------------------------------------------
-DATA_DIR = Path("/mnt/disk1/goes-data")          # GOES ABI NetCDFs
+DATA_DIR = Path("/mnt/disk4/goes-data")          # GOES ABI NetCDFs (full-day 3-hourly)
 GLM_DIR = Path("/mnt/disk1/glm-data")            # GLM lightning parquet/day
 STATES_GEOJSON = DATA_DIR / "aux/us-states.geojson"       # CONUS land boundary
 UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
@@ -25,33 +25,33 @@ UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
 # ---------------------------------------------------------------------------
 # Problem definition
 # ---------------------------------------------------------------------------
-YEAR = 2019
+# Training years — both fully covered by full-day 3-hourly GOES-16 on /mnt/disk4.
+YEARS = (2019, 2020)
+YEAR = YEARS[0]            # back-compat alias for single-year code paths (explore nbs)
 
-# GOES inputs: 6 ABI bands spanning 5 distinct physical channels, chosen by the
-# all-16-band signal diagnosis (notebooks/model/00b_band_signal.ipynb) against the
-# storm-event target. Each one is non-redundant — we deliberately avoid stacking
-# near-duplicate bands:
-#    2  red 0.64um        -> cloud albedo / thickness (one visible band is enough)
-#    3  veggie-NIR 0.86um -> vegetation vs standing-water contrast (surface signal)
-#    7  shortwave-win 3.9 -> low cloud + warm surface by day (top-ranked, non-redundant)
-#   10  low water-vapour 7.3 -> low/mid-trop moisture = the fuel for heavy rain (3.8x lift)
-#   13  clean-IR 10.3um   -> cloud-top temperature = convective intensity
-#   16  CO2 13.3um        -> cloud-top height = tall-cloud / deep-convection signal
-# Dropped vs the old set (1,2,3,6,13,16): band 1 (blue) was a near-duplicate of
-# band 2 (both visible reflectance), and band 6 (2.24um cloud-size) was the weakest
-# of all 16. Their slots went to the two missing physical signals: shortwave (7) and
-# water vapour (10). Net effect is modest (~+2% PR-AUC) — band choice is a
-# second-order knob; the per-cell location prior is the real lever.
-BANDS = (2, 3, 7, 10, 13, 16)
+# GOES inputs: 5 ABI bands, ALL emissive infrared (brightness temperature, K) so they
+# are observable day AND night. This matters now that one input day spans the FULL UTC
+# day (00–21 UTC, 8 frames) including night: the reflectance bands (1/2/3/6/7-day) go
+# dark after sunset and would be blank for ~half the frames, so we use only emissive
+# channels that read a real signal around the clock.
+#    8  upper-trop water-vapour 6.2um -> mid/upper moisture + jet-level dynamics
+#   10  low-trop water-vapour  7.3um  -> low/mid-trop moisture = the fuel for heavy rain
+#   11  cloud-top phase        8.4um  -> ice vs liquid cloud tops
+#   14  IR longwave window    11.2um  -> cloud-top temperature = convective intensity
+#   15  "dirty" longwave win  12.3um  -> low-level moisture via the 14-15 split-window
+# Coverage: moisture (8, 10, 15), cloud-top thermodynamics (11, 14), convective depth
+# (14). Visible/near-IR surface contrast is sacrificed for night coverage; with a
+# 24-hour cadence the round-the-clock IR bands are the natural choice.
+BANDS = (8, 10, 11, 14, 15)
 N_BAND = len(BANDS)
 
-# per-frame GOES channels: the 6 bands, optionally + a per-frame lead-time channel
-#   USE_TIME — append each frame's lead time (hours before day D's CST start,
-#              from _t.npy) as one extra channel, so the model knows how far ahead
-#              of the flood each frame sits.
+# per-frame GOES channels: the 5 bands, optionally + a per-frame lead-time channel
+#   USE_TIME — append each frame's lead time (whole hours before day D's UTC start,
+#              i.e. D 00:00 UTC, from _t.npy) as one extra channel, so the model knows
+#              how far ahead of the flood each frame sits.
 USE_TIME = True
-N_CH = N_BAND + (1 if USE_TIME else 0)            # GOES channels per frame (= 7)
-T_FRAMES = 6                                      # daytime frames/day (16-21 UTC)
+N_CH = N_BAND + (1 if USE_TIME else 0)            # GOES channels per frame (= 6)
+T_FRAMES = 8                                      # 3-hourly frames/day, full UTC day (00,03,..,21Z)
 IMG_H, IMG_W = 1500, 2500                         # ABI CONUS 2 km grid (rows, cols)
 
 # GLM lightning (DEFERRED): a SEPARATE input stream (not a GOES channel) — the
@@ -74,11 +74,12 @@ CELL_KM = 50
 POOL_STRIDE = 2
 
 # ---------------------------------------------------------------------------
-# Derived artifact paths (depend on YEAR / CELL_KM so changing the grid or year
-# never silently reuses a stale cache)
+# Derived artifact paths (depend on YEARS / CELL_KM so changing the grid or the year
+# span never silently reuses a stale cache)
 # ---------------------------------------------------------------------------
-STATS_PATH = DATA_DIR / f"aux/band_stats_{YEAR}.json"
-CACHE_DIR = ROOT / "cache" / f"floodnet_{YEAR}"   # on the project's NVMe (fast reads)
+_YEAR_TAG = "_".join(str(y) for y in YEARS)       # e.g. "2019_2020"
+STATS_PATH = DATA_DIR / f"aux/band_stats_{_YEAR_TAG}.json"
+CACHE_DIR = ROOT / "cache" / f"floodnet_{_YEAR_TAG}"  # project NVMe (fast reads)
 POOL_IDX_PATH = CACHE_DIR / f"pool_index_s{POOL_STRIDE}_{CELL_KM}km.npy"
 CKPT_DIR = Path("/mnt/disk1/models/floodnet_convlstm")
 
@@ -91,7 +92,7 @@ SPLIT_FRACS = (0.70, 0.20, 0.10)                  # train / val / test
 # ---------------------------------------------------------------------------
 # Training hyper-parameters — notebook 02
 # ---------------------------------------------------------------------------
-BATCH_PER_GPU = 2                                 # at POOL_STRIDE=2 (finer /2 encoder grid, ~4x activation memory)
+BATCH_PER_GPU = 1                             # at POOL_STRIDE=2 (finer /2 encoder grid, ~4x activation memory)
 EPOCHS = 2
 LR = 3e-4
 WORKERS = 8

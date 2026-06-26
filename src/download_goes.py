@@ -45,17 +45,17 @@ GOES19_START_DATE = date(2025, 4, 7)
 # 8 images per CST day at 3-hour gaps (00, 03, ..., 21 CST). GOES files are
 # UTC-named and CST = UTC-6 (DST ignored); since 6 h is a multiple of the 3 h
 # gap, the UTC target hours are the same 8 values 00..21.
-DEFAULT_TARGET_HOURS = [0, 3, 6, 9, 12, 15, 18, 21]
+DEFAULT_TARGET_HOURS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
 TYPICAL_FILE_SIZE_MB = 60.0   # verified: 57–61 MB per file
 
 # default full span; override per run with --start / --end
-DEFAULT_START = date(2019, 1, 1)
-DEFAULT_END = date(2026, 6, 10)
+DEFAULT_START = date(2026, 6, 1)
+DEFAULT_END = date(2026, 6, 22)
 
 # NOTE: downloads default to /mnt/disk4 (overflow). The model pipeline reads GOES
 # from /mnt/disk1/goes-data (config.DATA_DIR) — pass --data-dir to match, or
 # move/symlink, so the notebooks find what you pull here.
-DEFAULT_DATA_DIR = Path("/mnt/disk4/goes-data")
+DEFAULT_DATA_DIR = Path("/mnt/disk4/recent-goes")
 DEFAULT_WORKERS = 25           # saturates 100 MB/s with ~60 MB files
 
 
