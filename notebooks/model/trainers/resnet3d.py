@@ -1,13 +1,13 @@
-"""r2plus1d trainer on the unified GOES cache (config.CACHE_DIR).
+"""resnet3d trainer on the unified GOES cache (config.CACHE_DIR).
 
-R(2+1)D: factorized spatial+temporal 3D convolutions.
+Small 3D-ResNet: stem + 3 residual stages.
 
 Two-branch model: image encoder -> CellPool regrid (59x95) -> fused with the per-cell
 GOES/GLM/daily feature branch -> per-cell flood logit. Loss = 0.6 x weighted focal BCE
 + 0.4 x spatial-tolerance. Train across both GPUs with torchrun:
 
     cd notebooks/model
-    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/r2plus1d.py
+    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/resnet3d.py
 
 (Single-GPU also works.) Writes outputs/<name>.pt + outputs/<name>_results.npz and
 prints train/val/test AUPRC + P/R/F1/CSI (exact + 1-grid).
@@ -43,7 +43,7 @@ from config import CACHE_DIR  # noqa: E402
 # ===========================================================================
 # Hyperparameters & settings
 # ===========================================================================
-NAME = "r2plus1d"
+NAME = "resnet3d"
 
 N_IMG = 7              # image-stack channels (b8,b10,b14 + d10-8,d11-14 + dt_b14,cool)
 N_GOES = 4            # per-cell GOES features per frame
@@ -55,7 +55,7 @@ ENC_DOWN = 8
 ENC_H, ENC_W = 750 // ENC_DOWN, 1250 // ENC_DOWN          # 93 x 156 (stored /2 image)
 
 EPOCHS = 50           # quick first pass
-BATCH_SIZE = 12         # per GPU
+BATCH_SIZE = 24         # per GPU
 WORKERS = 8
 
 LR = 3e-4
@@ -111,32 +111,45 @@ class CellPool(nn.Module):
 ENC_OUT = 128
 
 
-def _r2p1(ci, co):
-    """A factorized (2+1)D block: spatial (1,3,3) then temporal (3,1,1)."""
-    return nn.Sequential(
-        nn.Conv3d(ci, co, (1, 3, 3), padding=(0, 1, 1), bias=False),
-        nn.BatchNorm3d(co), nn.ReLU(inplace=True),
-        nn.Conv3d(co, co, (3, 1, 1), padding=(1, 0, 0), bias=False),
-        nn.BatchNorm3d(co), nn.ReLU(inplace=True),
-    )
+class Res3DBlock(nn.Module):
+    """Basic 3D residual block; the stride downsamples residual and skip together."""
+
+    def __init__(self, ci, co, stride):
+        super().__init__()
+        self.c1 = nn.Conv3d(ci, co, 3, stride=stride, padding=1, bias=False)
+        self.b1 = nn.BatchNorm3d(co)
+        self.c2 = nn.Conv3d(co, co, 3, padding=1, bias=False)
+        self.b2 = nn.BatchNorm3d(co)
+        self.skip = (nn.Sequential(nn.Conv3d(ci, co, 1, stride=stride, bias=False),
+                                   nn.BatchNorm3d(co))
+                     if (stride != (1, 1, 1) or ci != co) else nn.Identity())
+
+    def forward(self, x):
+        y = F.relu(self.b1(self.c1(x)))
+        y = self.b2(self.c2(y))
+        return F.relu(y + self.skip(x))
 
 
 class Encoder(nn.Module):
-    """R(2+1)D: factorized spatial/temporal 3D convolutions, /8 in space, time -> 1."""
+    """Small 3D-ResNet: stem + 3 residual stages (one block each)."""
 
     def __init__(self):
         super().__init__()
-        self.net = nn.Sequential(
+        self.stem = nn.Sequential(
             nn.BatchNorm3d(N_IMG),
-            _r2p1(N_IMG, 32), nn.MaxPool3d((1, 2, 2)),        # 8,375,625
-            _r2p1(32, 64), nn.MaxPool3d((2, 2, 2)),           # 4,187,312
-            _r2p1(64, 128), nn.MaxPool3d((2, 2, 2)),          # 2,93,156
-            nn.Dropout3d(DROPOUT),
-            _r2p1(128, 128), nn.MaxPool3d((2, 1, 1)),         # 1,93,156
+            nn.Conv3d(N_IMG, 32, (3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2),
+                      bias=False),
+            nn.BatchNorm3d(32), nn.ReLU(inplace=True),        # 8,~375,~625
         )
+        self.s1 = Res3DBlock(32, 64, (2, 2, 2))               # 4,~188,~313
+        self.s2 = Res3DBlock(64, 128, (2, 2, 2))              # 2,~94,~157
+        self.drop = nn.Dropout3d(DROPOUT)
+        self.s3 = Res3DBlock(128, 128, (2, 1, 1))             # 1,~94,~157
 
     def forward(self, img):                                   # (B,T,7,H,W)
-        return self.net(img.permute(0, 2, 1, 3, 4)).squeeze(2)
+        x = self.stem(img.permute(0, 2, 1, 3, 4))
+        x = self.s3(self.drop(self.s2(self.s1(x))))
+        return x.squeeze(2)                                   # FloodNet adaptive-pools
 
 
 # ===========================================================================

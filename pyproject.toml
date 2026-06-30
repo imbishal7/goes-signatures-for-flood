@@ -31,6 +31,7 @@ dependencies = [
     "einops",              # tensor reshaping for vision / remote-sensing models
     "xbatcher",            # stream xarray (GOES NetCDF) into ML batches
     "tensorboard",         # training metrics / logging
+    "xgboost>=3.2.0",
 ]
 
 [project.optional-dependencies]

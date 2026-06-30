@@ -56,5 +56,6 @@ def build_pix2cell():
           & (col >= 0) & (col < grid_c) & (row >= 0) & (row < grid_r))
     p2c = np.full(ax.shape, -1, np.int32)
     p2c[ok] = (row[ok] * grid_c + col[ok]).astype(np.int32)
+    cache.parent.mkdir(parents=True, exist_ok=True)       # np.save won't create the dir
     np.save(cache, p2c)
     return p2c, grid_r, grid_c, land_mask

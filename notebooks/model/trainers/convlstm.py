@@ -1,26 +1,16 @@
-"""Model #4 — ConvLSTM (GOES -> next-day warning grid).
+"""convlstm trainer on the unified GOES cache (config.CACHE_DIR).
 
-Task: from CDT day D-1's GOES imagery (8 three-hourly frames, the curated emissive-IR
-bands) predict day D's NWS flood-warning grid (per-cell flood probability).
+Per-frame 2D CNN + ConvLSTM temporal recurrence.
 
-The recurrent sibling of the 3D-CNN models: a shared 2D CNN encodes each frame to /8,
-then a ConvLSTM walks the 8 frames carrying a spatial hidden state that summarizes the
-day's evolution (clouds building, water vapour advecting). The final hidden state is
-regridded onto the 50 km grid by CellPool and a 2D head emits the per-cell logit.
-
-Everything — model, data, loss, LR schedule, DDP — lives in one file. Train across
-both GPUs with torchrun (one process per GPU):
+Two-branch model: image encoder -> CellPool regrid (59x95) -> fused with the per-cell
+GOES/GLM/daily feature branch -> per-cell flood logit. Loss = 0.6 x weighted focal BCE
++ 0.4 x spatial-tolerance. Train across both GPUs with torchrun:
 
     cd notebooks/model
     NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/convlstm.py
 
-(Single-GPU also works: `python trainers/convlstm.py`.)
-
-Data contract (built by 01_prepare_data.ipynb), per CDT day D:
-    {CACHE_DIR}/{D:%Y%m%d}_x.npy   (8, 5, 1500, 2500) f16   GOES cube (config.BANDS)
-    {CACHE_DIR}/{D:%Y%m%d}_t.npy   (8,) f32                  per-frame lead hours
-    {CACHE_DIR}/{D:%Y%m%d}_y.npy   (59, 95) uint8            warning grid (label)
-    {CACHE_DIR}/manifest.parquet                             train/val/test split
+(Single-GPU also works.) Writes outputs/<name>.pt + outputs/<name>_results.npz and
+prints train/val/test AUPRC + P/R/F1/CSI (exact + 1-grid).
 """
 import os
 import sys
@@ -33,45 +23,56 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from sklearn.metrics import average_precision_score
+import torch.nn.functional as F
+from sklearn.metrics import average_precision_score, precision_recall_curve
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-# config.py (repo root) = paths/bands/grid; gridindex.build_pix2cell = the cached
-# GOES-pixel -> 50 km-cell index (heavy pyproj math kept in one canonical place).
+# config.py (repo root) + gridindex (parent dir) = shared 50 km grid index
 ROOT = Path(__file__).resolve().parent
 while not (ROOT / "config.py").exists() and ROOT != ROOT.parent:
     ROOT = ROOT.parent
 sys.path.insert(0, str(ROOT))
-MODEL_DIR = ROOT / "notebooks" / "model"   # gridindex.py + outputs/ live here
-sys.path.insert(0, str(MODEL_DIR))         # for `gridindex`
-OUT_DIR = MODEL_DIR / "outputs"            # model checkpoints + results npz
+MODEL_DIR = ROOT / "notebooks" / "model"
+sys.path.insert(0, str(MODEL_DIR))
+OUT_DIR = MODEL_DIR / "outputs"
 from gridindex import build_pix2cell  # noqa: E402
 
-from config import BANDS, CACHE_DIR, N_BAND, USE_TIME  # noqa: E402
+from config import CACHE_DIR  # noqa: E402
 
 # ===========================================================================
 # Hyperparameters & settings
 # ===========================================================================
-N_CH = N_BAND + (1 if USE_TIME else 0)        # GOES channels per frame (5 bands + lead)
+NAME = "convlstm"
+
+N_IMG = 7              # image-stack channels (b8,b10,b14 + d10-8,d11-14 + dt_b14,cool)
+N_GOES = 4            # per-cell GOES features per frame
+N_GLM = 2             # per-cell GLM features per 3h bin
+N_DAILY = 3           # per-cell daily summary features
+T_FRAMES = 8
 GRID_R, GRID_C = 59, 95                        # output flood grid (CONUS-land 50 km)
 ENC_DOWN = 8
-ENC_H, ENC_W = 1500 // ENC_DOWN, 2500 // ENC_DOWN          # 187 x 312
-HIDDEN = 64                   # ConvLSTM hidden channels (gate conv scales ~HIDDEN**2)
+ENC_H, ENC_W = 750 // ENC_DOWN, 1250 // ENC_DOWN          # 93 x 156 (stored /2 image)
 
-EPOCHS = 50
-BATCH_SIZE = 4                 # per GPU (~51 GB peak measured); fits under 96 GB
-WORKERS = 4
+EPOCHS = 50           # quick first pass
+BATCH_SIZE = 16         # per GPU
+WORKERS = 8
 
 LR = 3e-4
 MIN_LR = 1e-5
 WARMUP_EPOCHS = 1
-POS_WEIGHT_CAP = 100.0
+GAMMA = 2.0           # focal-loss focusing strength
+LOSS_FOCAL_W = 0.6    # weight for weighted focal BCE term
+LOSS_STOL_W = 0.4     # weight for spatial tolerance term
+POS_WEIGHT_CAP = 40.0
 SEED = 0
+PATIENCE = 10
+WEIGHT_DECAY = 1e-2
+DROPOUT = 0.2
 
 
 # ===========================================================================
-# CellPool — geographically-correct regrid (replaces a blind bilinear resize)
+# CellPool — geographically-correct regrid (the real GOES-pixel -> 50 km index)
 # ===========================================================================
 def _subsample_index(p2c, h, w):
     """Nearest-subsample the full-res (1500,2500) pixel->cell index to (h, w)."""
@@ -83,9 +84,7 @@ def _subsample_index(p2c, h, w):
 
 class CellPool(nn.Module):
     """Scatter-mean encoder pixels into the (GRID_R, GRID_C) cells via the real
-    GOES-pixel -> 50 km-cell index. Each cell's feature = mean of the encoder pixels
-    that physically fall in it (off-grid pixels discarded), so the regrid respects the
-    GOES->Albers projection instead of just stretching."""
+    GOES-pixel -> 50 km-cell index (off-grid pixels discarded)."""
 
     def __init__(self, pix2cell_sub, grid_r, grid_c):
         super().__init__()
@@ -107,61 +106,131 @@ class CellPool(nn.Module):
 
 
 # ===========================================================================
-# Model
+# Image encoder (the only model-specific piece) -> (B, ENC_OUT, ~93, ~156)
 # ===========================================================================
-class GOESConvLSTM(nn.Module):
-    """Shared per-frame 2D encoder -> ConvLSTM over time -> CellPool regrid -> head.
+ENC_OUT = 64
 
-    Input  : (B, T=8, C=n_ch, 1500, 2500)
-    Output : (B, 1, GRID_R, GRID_C) raw logits (apply sigmoid for probability).
-    """
 
-    def __init__(self, pix2cell_sub, grid_r, grid_c, n_ch=N_CH, hidden=HIDDEN):
+class Encoder(nn.Module):
+    """Per-frame 2D CNN + ConvLSTM recurrence over the 8 frames (final hidden)."""
+
+    def __init__(self, hidden=64):
         super().__init__()
         self.hidden = hidden
-        # per-frame encoder: (B, n_ch, 1500, 2500) -> (B, hidden, 187, 312)
-        self.encoder = nn.Sequential(
-            nn.BatchNorm2d(n_ch),
-            nn.Conv2d(n_ch, 32, 5, padding=2),
-            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),                                  # /2
-            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),                                  # /4
+        self.frame = nn.Sequential(
+            nn.BatchNorm2d(N_IMG),
+            nn.Conv2d(N_IMG, 32, 5, padding=2),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True), nn.MaxPool2d(2),   # 375,625
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True), nn.MaxPool2d(2),   # 187,312
             nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),                                  # /8
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True), nn.MaxPool2d(2),  # 93,156
             nn.Conv2d(128, hidden, 3, padding=1),
-            nn.BatchNorm2d(hidden), nn.ReLU(inplace=True),
+            nn.BatchNorm2d(hidden), nn.ReLU(inplace=True), nn.Dropout2d(DROPOUT),
         )
-        # ConvLSTM gate conv: [encoded frame, prev hidden] -> 4 gates (i, f, o, g)
         self.gates = nn.Conv2d(hidden + hidden, 4 * hidden, 3, padding=1)
-        self.pool = CellPool(pix2cell_sub, grid_r, grid_c)   # 187x312 -> 59x95
-        self.head = nn.Sequential(                           # runs on the cell grid
-            nn.Conv2d(hidden, 64, 3, padding=1),
-            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 1, 1),
-        )
 
-    def forward(self, x):                                    # B, T, C, H, W
-        B, T = x.shape[:2]
-        # encode every frame with the shared 2D CNN (fold T into the batch axis)
-        feats = self.encoder(x.flatten(0, 1)).unflatten(0, (B, T))   # B,T,hid,h,w
-        # ConvLSTM: walk the frames, carrying hidden state h and cell state c
-        h = feats.new_zeros(B, self.hidden, *feats.shape[-2:])
+    def forward(self, img):                                   # (B,T,7,H,W)
+        B, T = img.shape[:2]
+        f = self.frame(img.flatten(0, 1)).unflatten(0, (B, T))   # (B,T,hidden,93,156)
+        h = f.new_zeros(B, self.hidden, *f.shape[-2:])
         c = torch.zeros_like(h)
         for t in range(T):
-            i, f, o, g = self.gates(torch.cat([feats[:, t], h], 1)).chunk(4, 1)
-            c = f.sigmoid() * c + i.sigmoid() * g.tanh()
+            i, fg, o, g = self.gates(torch.cat([f[:, t], h], 1)).chunk(4, 1)
+            c = fg.sigmoid() * c + i.sigmoid() * g.tanh()
             h = o.sigmoid() * c.tanh()
-        return self.head(self.pool(h))                       # B, 1, R, C (logits)
+        return h                                              # (B,hidden,93,156)
+
+
+# ===========================================================================
+# Two-branch model — encoder (image) fused with the per-cell feature branch
+# ===========================================================================
+class FloodNet(nn.Module):
+    """Inputs: img (B,T,7,750,1250), goes (B,T,4,R,C), glm (B,T,2,R,C), daily (B,3,R,C),
+    t (B,T) lead time. Output: (B,1,R,C) logits (sigmoid for probability)."""
+
+    def __init__(self, pix2cell_sub, grid_r, grid_c):
+        super().__init__()
+        self.encoder = Encoder()
+        self.pool = CellPool(pix2cell_sub, grid_r, grid_c)
+        # cell branch: goes + glm (flattened over T) + daily + lead time (T broadcast)
+        cell_in = T_FRAMES * N_GOES + T_FRAMES * N_GLM + N_DAILY + T_FRAMES  # 32+16+3+8=59
+        self.cell_enc = nn.Sequential(
+            nn.BatchNorm2d(cell_in),
+            nn.Conv2d(cell_in, 128, 3, padding=1),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.Dropout2d(DROPOUT),
+            nn.Conv2d(128, 64, 3, padding=1),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+        )
+        self.head = nn.Sequential(
+            nn.Conv2d(ENC_OUT + 64, 128, 3, padding=1),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.Conv2d(128, 64, 3, padding=1),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.Dropout2d(DROPOUT),
+            nn.Conv2d(64, 1, 1),
+        )
+
+    def forward(self, img, goes, glm, daily, t):
+        B = img.shape[0]
+        x = self.encoder(img)                                 # (B,ENC_OUT,~93,~156)
+        x = F.adaptive_avg_pool2d(x, (ENC_H, ENC_W))          # guarantee CellPool dims
+        x = self.pool(x)                                      # (B,ENC_OUT,R,C)
+        t_grid = t.view(B, T_FRAMES, 1, 1).expand(B, T_FRAMES, GRID_R, GRID_C)
+        cell = torch.cat([goes.reshape(B, -1, GRID_R, GRID_C),
+                          glm.reshape(B, -1, GRID_R, GRID_C),
+                          daily, t_grid], dim=1)              # (B,59,R,C)
+        cell = self.cell_enc(cell)                            # (B,64,R,C)
+        return self.head(torch.cat([x, cell], dim=1))        # (B,1,R,C) logits
+
+
+# ===========================================================================
+# Loss — 0.6 x weighted focal BCE + 0.4 x spatial tolerance
+# ===========================================================================
+def _weighted_focal_bce(logits, y, pos_weight, gamma=2.0):
+    """Focal-modulated BCE with scalar pos_weight. logits/y: (B, N_land), fp32."""
+    logits = logits.float()
+    y = y.float()
+    pw = torch.full((1,), pos_weight, dtype=torch.float32, device=logits.device)
+    bce = F.binary_cross_entropy_with_logits(logits, y, pos_weight=pw, reduction="none")
+    p_t = torch.sigmoid(logits) * y + (1 - torch.sigmoid(logits)) * (1 - y)
+    return ((1 - p_t) ** gamma * bce).mean()
+
+
+def _spatial_tolerance_loss(probs, y_f, land_t, eps=1e-6):
+    """Spatial-tolerant positive + far-false-alarm loss over the 2D grid.
+
+    Positive: credit_i = max(p[i], 0.5*max_p over 3x3); term = -log(credit_i).
+    False alarm: -log(1-p[k]) for land cells with no true flood within 1 grid.
+    """
+    probs = probs.float()
+    y_f = y_f.float()
+    max_nbr = F.max_pool2d(probs.unsqueeze(1), 3, stride=1, padding=1).squeeze(1)
+    credit = torch.maximum(probs, 0.5 * max_nbr)
+    pos_loss = -(torch.log(credit.clamp(min=eps)) * y_f * land_t)
+    pos_norm = (y_f * land_t).sum().clamp(min=1)
+    near = F.max_pool2d(y_f.unsqueeze(1), 3, stride=1, padding=1).squeeze(1) > 0
+    fa_mask = (~(y_f > 0.5)) & (~near) & land_t.unsqueeze(0)
+    fa_loss = -(torch.log((1 - probs).clamp(min=eps)) * fa_mask.float())
+    fa_norm = fa_mask.float().sum().clamp(min=1)
+    return 0.5 * pos_loss.sum() / pos_norm + 0.5 * fa_loss.sum() / fa_norm
+
+
+def combined_loss(logits, y, land_t, pos_weight):
+    """0.6 x weighted focal BCE (land cells) + 0.4 x spatial tolerance (full grid)."""
+    logits_f = logits.float()
+    y_f = y.float()
+    wfocal = _weighted_focal_bce(logits_f[:, land_t], y_f[:, land_t], pos_weight, GAMMA)
+    stol = _spatial_tolerance_loss(torch.sigmoid(logits_f), y_f, land_t)
+    return LOSS_FOCAL_W * wfocal + LOSS_STOL_W * stol
 
 
 # ===========================================================================
 # Data
 # ===========================================================================
-class FloodCache(Dataset):
-    """One CDT day: GOES cube (+ optional lead-time channel) + warning grid."""
+class FeatureCache(Dataset):
+    """One CDT day: image stack + per-cell GOES/GLM/daily features + label."""
 
     def __init__(self, days):
         self.days = list(days)
@@ -171,51 +240,124 @@ class FloodCache(Dataset):
 
     def __getitem__(self, i):
         d = self.days[i]
-        x = np.load(CACHE_DIR / f"{d}_x.npy")            # (T, N_BAND, H, W) f16
-        y = np.load(CACHE_DIR / f"{d}_y.npy").astype(np.float32)   # (59, 95)
-        if USE_TIME:
-            t = np.load(CACHE_DIR / f"{d}_t.npy")                  # (T,) lead hours
-            T, _, H, W = x.shape
-            lead = np.empty((T, 1, H, W), np.float16)
-            lead[:] = (t / 24.0).astype(np.float16).reshape(T, 1, 1, 1)
-            x = np.concatenate([x, lead], axis=1)                 # (T, N_BAND+1, H, W)
-        return torch.from_numpy(x), torch.from_numpy(y)
+        img = np.load(CACHE_DIR / f"{d}_img.npy")                       # (T,7,H,W) f16
+        goes = np.nan_to_num(np.load(CACHE_DIR / f"{d}_goes.npy"))      # (T,4,R,C)
+        glm = np.nan_to_num(np.load(CACHE_DIR / f"{d}_glm.npy"))        # (T,2,R,C)
+        daily = np.nan_to_num(np.load(CACHE_DIR / f"{d}_daily.npy"))    # (3,R,C)
+        t = np.load(CACHE_DIR / f"{d}_t.npy").astype(np.float32)        # (T,) lead time
+        y = np.load(CACHE_DIR / f"{d}_y.npy").astype(np.float32)        # (R,C)
+        return (torch.from_numpy(img), torch.from_numpy(goes),
+                torch.from_numpy(glm), torch.from_numpy(daily),
+                torch.from_numpy(t), torch.from_numpy(y))
 
 
 def load_splits():
-    """Read the train/val/test day lists (YYYYMMDD strings) from the manifest."""
+    """Train/val/test day lists, filtered to days whose _img.npy exists on disk."""
     m = pd.read_parquet(CACHE_DIR / "manifest.parquet")
+
     def days(s):
-        return [d.strftime("%Y%m%d") for d in m.loc[m.split == s, "label_day"]]
+        ds = [d.strftime("%Y%m%d") for d in m.loc[m.split == s, "label_day"]]
+        return [d for d in ds if (CACHE_DIR / f"{d}_img.npy").exists()]
+
     return days("train"), days("val"), days("test")
-
-
-def train_pos_rate(days, land):
-    """Mean warning rate over land on the train days -> the BCE positive weight."""
-    acc = np.zeros((GRID_R, GRID_C), np.float64)
-    for d in days:
-        acc += np.load(CACHE_DIR / f"{d}_y.npy")
-    return float((acc / len(days))[land].mean())
 
 
 # ===========================================================================
 # Evaluation
 # ===========================================================================
+def _dilate_1grid(mask):
+    """Dilate a 2D bool array by 1 cell in all 8 directions (pure numpy)."""
+    out = mask.copy()
+    out[:-1, :] |= mask[1:, :]
+    out[1:, :] |= mask[:-1, :]
+    out[:, :-1] |= mask[:, 1:]
+    out[:, 1:] |= mask[:, :-1]
+    out[:-1, :-1] |= mask[1:, 1:]
+    out[1:, 1:] |= mask[:-1, :-1]
+    out[:-1, 1:] |= mask[1:, :-1]
+    out[1:, :-1] |= mask[:-1, 1:]
+    return out
+
+
 @torch.no_grad()
-def evaluate(model, days, land, dev):
-    """Return PR-AUC over land cells for the given days (run on rank 0 only)."""
+def evaluate(model, days, land, dev, pos_weight):
+    """AUPRC + mean combined loss over land cells (fast per-epoch eval)."""
     model.eval()
-    probs, trues = [], []
-    loader = DataLoader(FloodCache(days), batch_size=1, num_workers=WORKERS)
-    for x, y in loader:
-        x = x.to(dev).float()
+    land_t = torch.from_numpy(land).to(dev)
+    probs_all, trues_all, losses = [], [], []
+    loader = DataLoader(FeatureCache(days), batch_size=1, num_workers=WORKERS)
+    for img, goes, glm, daily, t, y in loader:
+        img = img.to(dev).float()
+        goes = goes.to(dev).float()
+        glm = glm.to(dev).float()
+        daily = daily.to(dev).float()
+        t = t.to(dev).float()
+        yt = y.to(dev)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            p = torch.sigmoid(model(x)).float().squeeze(1).cpu()   # (1, 59, 95)
-        probs.append(p.numpy())
-        trues.append(y.numpy())
-    probs = np.concatenate(probs)
-    trues = np.concatenate(trues)
-    return average_precision_score(trues[:, land].ravel(), probs[:, land].ravel())
+            logits = model(img, goes, glm, daily, t).squeeze(1)
+        loss = combined_loss(logits, yt, land_t, pos_weight)
+        probs_all.append(torch.sigmoid(logits).float().cpu().numpy())
+        trues_all.append(y.numpy())
+        losses.append(float(loss))
+    probs = np.concatenate(probs_all)
+    trues = np.concatenate(trues_all)
+    prauc = average_precision_score(trues[:, land].ravel(), probs[:, land].ravel())
+    return prauc, float(np.mean(losses))
+
+
+@torch.no_grad()
+def evaluate_full(model, days, land, dev, threshold=None):
+    """AUPRC + P/R/F1/CSI (exact + 1-grid neighbourhood). Returns a dict."""
+    model.eval()
+    probs_all, trues_all = [], []
+    loader = DataLoader(FeatureCache(days), batch_size=1, num_workers=WORKERS)
+    for img, goes, glm, daily, t, y in loader:
+        img = img.to(dev).float()
+        goes = goes.to(dev).float()
+        glm = glm.to(dev).float()
+        daily = daily.to(dev).float()
+        t = t.to(dev).float()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            logits = model(img, goes, glm, daily, t).squeeze(1)
+        probs_all.append(torch.sigmoid(logits).float().cpu().numpy())
+        trues_all.append(y.numpy())
+    probs = np.concatenate(probs_all)
+    trues = np.concatenate(trues_all)
+
+    p_land = probs[:, land].ravel()
+    t_land = trues[:, land].ravel().astype(np.int32)
+    prauc = average_precision_score(t_land, p_land)
+
+    if threshold is None:
+        pr_c, rc_c, thr_c = precision_recall_curve(t_land, p_land)
+        f1_c = 2 * pr_c * rc_c / (pr_c + rc_c + 1e-9)
+        threshold = float(thr_c[np.argmax(f1_c[:-1])])
+
+    yb = (p_land >= threshold).astype(np.int32)
+    tp = int((yb * t_land).sum())
+    fp = int((yb * (1 - t_land)).sum())
+    fn = int(((1 - yb) * t_land).sum())
+    prec = tp / (tp + fp + 1e-9)
+    rec = tp / (tp + fn + 1e-9)
+    f1 = 2 * prec * rec / (prec + rec + 1e-9)
+    csi = tp / (tp + fn + fp + 1e-9)
+
+    h_nb = m_nb = fa_nb = 0
+    for i in range(len(probs)):
+        yt_2d = (trues[i] > 0.5) & land
+        yp_2d = (probs[i] >= threshold) & land
+        yt_dil = _dilate_1grid(yt_2d) & land
+        yp_dil = _dilate_1grid(yp_2d) & land
+        h_nb += int((yt_2d & yp_dil).sum())
+        m_nb += int((yt_2d & ~yp_dil).sum())
+        fa_nb += int((yp_2d & ~yt_dil).sum())
+    prec1 = h_nb / (h_nb + fa_nb + 1e-9)
+    rec1 = h_nb / (h_nb + m_nb + 1e-9)
+    f1_1 = 2 * prec1 * rec1 / (prec1 + rec1 + 1e-9)
+    csi1 = h_nb / (h_nb + m_nb + fa_nb + 1e-9)
+
+    return dict(prauc=prauc, thr=threshold, prec=prec, rec=rec, f1=f1, csi=csi,
+                prec1=prec1, rec1=rec1, f1_1=f1_1, csi1=csi1)
 
 
 # ===========================================================================
@@ -226,7 +368,6 @@ def main():
     np.random.seed(SEED)
     torch.set_float32_matmul_precision("high")
 
-    # ---- DDP setup (one process per GPU via torchrun; falls back to single-GPU) ----
     ddp = "RANK" in os.environ
     local = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local)
@@ -238,30 +379,33 @@ def main():
         rank, world = 0, 1
     is_main = rank == 0
 
-    p2c, gr, gc, land = build_pix2cell()                   # cached pixel->cell index
+    p2c, gr, gc, land = build_pix2cell()
     assert (gr, gc) == (GRID_R, GRID_C), f"grid mismatch: {(gr, gc)}"
     pix_sub = _subsample_index(p2c, ENC_H, ENC_W)
-    land_t = torch.from_numpy(land).to(dev)                # (59, 95) bool
+    land_t = torch.from_numpy(land).to(dev)
 
     tr_days, va_days, te_days = load_splits()
-    tr_eval = tr_days[:64]         # fixed train subset scored each epoch (cheap proxy)
-    pos_rate = train_pos_rate(tr_days, land)
-    pos_weight = min((1 - pos_rate) / pos_rate, POS_WEIGHT_CAP)
+    tr_eval = tr_days[:64]
 
-    # SyncBatchNorm: per-GPU batch is tiny (1 cube), so sync BN stats across GPUs.
-    net = GOESConvLSTM(pix_sub, gr, gc).to(dev)
+    tr_ys = np.stack([np.load(CACHE_DIR / f"{d}_y.npy") for d in tr_days])
+    pos_rate = float(tr_ys[:, land].mean())
+    raw_pw = (1 - pos_rate) / max(pos_rate, 1e-6)
+    pos_weight = float(np.clip(raw_pw, 1.0, POS_WEIGHT_CAP))
+
+    net = FloodNet(pix_sub, gr, gc).to(dev)
     if ddp:
         net = nn.SyncBatchNorm.convert_sync_batchnorm(net)
     model = DDP(net, device_ids=[local]) if ddp else net
 
     if is_main:
         n_params = sum(p.numel() for p in net.parameters())
-        print(f"bands={BANDS} use_time={USE_TIME} n_ch={N_CH} "
-              f"train={len(tr_days)} val={len(va_days)} test={len(te_days)} "
-              f"world={world} params={n_params:,} "
-              f"pos_rate={pos_rate:.4f} pos_weight={pos_weight:.1f}", flush=True)
+        print(
+            f"[{NAME}] train={len(tr_days)} val={len(va_days)} test={len(te_days)} "
+            f"world={world} params={n_params:,} pos_weight={pos_weight:.1f}",
+            flush=True,
+        )
 
-    opt = torch.optim.AdamW(model.parameters(), lr=LR)
+    opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     warmup = torch.optim.lr_scheduler.LinearLR(
         opt, start_factor=0.1, total_iters=max(1, WARMUP_EPOCHS))
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -269,28 +413,28 @@ def main():
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         opt, [warmup, cosine], milestones=[max(1, WARMUP_EPOCHS)])
 
-    # Loss: BCE-with-logits; pos_weight up-weights the rare flood class (else it
-    # collapses to all-zero).
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=dev))
-
-    tr_ds = FloodCache(tr_days)
+    tr_ds = FeatureCache(tr_days)
     sampler = DistributedSampler(tr_ds, shuffle=True) if ddp else None
     train_loader = DataLoader(tr_ds, batch_size=BATCH_SIZE, shuffle=(sampler is None),
                               sampler=sampler, num_workers=WORKERS, drop_last=False)
 
-    hist = []   # (epoch, lr, loss, train_prauc, val_prauc, test_prauc)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    ckpt = OUT_DIR / f"{NAME}.pt"
+    hist = []
+    best_val, best_epoch, no_improve = -1.0, 0, 0
     for epoch in range(1, EPOCHS + 1):
         cur_lr = opt.param_groups[0]["lr"]
         if sampler is not None:
             sampler.set_epoch(epoch)
         model.train()
         tot = torch.zeros((), device=dev)
-        for x, y in train_loader:
-            x = x.to(dev).float()                          # (B, T, n_ch, H, W)
-            y = y.to(dev)                                  # (B, 59, 95)
+        for img, goes, glm, daily, t, y in train_loader:
+            img, goes = img.to(dev).float(), goes.to(dev).float()
+            glm, daily = glm.to(dev).float(), daily.to(dev).float()
+            t, y = t.to(dev).float(), y.to(dev)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                logits = model(x).squeeze(1)              # (B, 59, 95)
-                loss = loss_fn(logits[:, land_t], y[:, land_t])   # land cells only
+                logits = model(img, goes, glm, daily, t).squeeze(1)
+            loss = combined_loss(logits, y, land_t, pos_weight)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -301,23 +445,65 @@ def main():
         train_loss = (tot / (len(train_loader) * world)).item()
         scheduler.step()
 
+        stop = torch.zeros(1, device=dev)
         if is_main:
-            tr_prauc = evaluate(net, tr_eval, land, dev)
-            va_prauc = evaluate(net, va_days, land, dev)
-            te_prauc = evaluate(net, te_days, land, dev)
-            hist.append((epoch, cur_lr, train_loss, tr_prauc, va_prauc, te_prauc))
-            print(f"epoch {epoch:2d}/{EPOCHS}  lr {cur_lr:.2e}  loss {train_loss:.4f}  "
-                  f"PR-AUC train {tr_prauc:.4f} val {va_prauc:.4f} test {te_prauc:.4f}",
-                  flush=True)
+            tr_prauc, _ = evaluate(net, tr_eval, land, dev, pos_weight)
+            va_prauc, va_loss = evaluate(net, va_days, land, dev, pos_weight)
+            te_prauc, te_loss = evaluate(net, te_days, land, dev, pos_weight)
+            hist.append((epoch, cur_lr, train_loss, va_loss, te_loss,
+                         tr_prauc, va_prauc, te_prauc))
+            improved = va_prauc > best_val
+            if improved:
+                best_val, best_epoch, no_improve = va_prauc, epoch, 0
+                torch.save(net.state_dict(), ckpt)
+            else:
+                no_improve += 1
+                if no_improve >= PATIENCE:
+                    stop[0] = 1.0
+            print(
+                f"[{NAME}] epoch {epoch:2d}/{EPOCHS}  lr {cur_lr:.2e}  "
+                f"loss tr {train_loss:.4f} val {va_loss:.4f}  "
+                f"AUPRC tr {tr_prauc:.4f} val {va_prauc:.4f} test {te_prauc:.4f}"
+                f"{'  *best' if improved else ''}",
+                flush=True,
+            )
         if ddp:
-            dist.barrier()
+            dist.broadcast(stop, src=0)
+        if stop.item() > 0:
+            if is_main:
+                print(f"[{NAME}] early stop @ epoch {epoch} "
+                      f"(best val {best_val:.4f} @ {best_epoch})", flush=True)
+            break
 
     if is_main:
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        ckpt = OUT_DIR / "convlstm.pt"
-        torch.save(net.state_dict(), ckpt)
-        np.savez(OUT_DIR / "convlstm_results.npz", hist=np.array(hist, np.float32))
-        print(f"saved {ckpt} + convlstm_results.npz", flush=True)
+        np.savez(OUT_DIR / f"{NAME}_results.npz", hist=np.array(hist, np.float32))
+        net.load_state_dict(torch.load(ckpt))
+        val_m = evaluate_full(net, va_days, land, dev, threshold=None)
+        tr_m = evaluate_full(net, tr_days, land, dev, threshold=val_m["thr"])
+        te_m = evaluate_full(net, te_days, land, dev, threshold=val_m["thr"])
+        te_y = np.stack([np.load(CACHE_DIR / f"{d}_y.npy") for d in te_days])
+        base = float(te_y[:, land].mean())
+
+        def row(label, m):
+            return (
+                f"  {label:<6}  AUPRC {m['prauc']:.4f}  "
+                f"P {m['prec']:.3f}  R {m['rec']:.3f}  "
+                f"F1 {m['f1']:.3f}  CSI {m['csi']:.3f}  |  "
+                f"P@1 {m['prec1']:.3f}  R@1 {m['rec1']:.3f}  "
+                f"F1@1 {m['f1_1']:.3f}  CSI@1 {m['csi1']:.3f}"
+            )
+
+        print("=" * 78)
+        print(f"[{NAME}] FINAL  best-val @ epoch {best_epoch}  "
+              f"threshold {val_m['thr']:.3f} (best-val F1)")
+        lift = te_m["prauc"] / base
+        print(f"  test base rate {base:.4f}  ->  AUPRC lift {lift:.1f}x")
+        print("-" * 78)
+        print(row("train", tr_m))
+        print(row("val", val_m))
+        print(row("test", te_m))
+        print("=" * 78, flush=True)
+
     if ddp:
         dist.destroy_process_group()
 

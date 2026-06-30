@@ -1,13 +1,13 @@
-"""r2plus1d trainer on the unified GOES cache (config.CACHE_DIR).
+"""cnn_attn trainer on the unified GOES cache (config.CACHE_DIR).
 
-R(2+1)D: factorized spatial+temporal 3D convolutions.
+Per-frame 2D CNN with temporal attention pooling.
 
 Two-branch model: image encoder -> CellPool regrid (59x95) -> fused with the per-cell
 GOES/GLM/daily feature branch -> per-cell flood logit. Loss = 0.6 x weighted focal BCE
 + 0.4 x spatial-tolerance. Train across both GPUs with torchrun:
 
     cd notebooks/model
-    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/r2plus1d.py
+    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/cnn_attn.py
 
 (Single-GPU also works.) Writes outputs/<name>.pt + outputs/<name>_results.npz and
 prints train/val/test AUPRC + P/R/F1/CSI (exact + 1-grid).
@@ -43,7 +43,7 @@ from config import CACHE_DIR  # noqa: E402
 # ===========================================================================
 # Hyperparameters & settings
 # ===========================================================================
-NAME = "r2plus1d"
+NAME = "cnn_attn"
 
 N_IMG = 7              # image-stack channels (b8,b10,b14 + d10-8,d11-14 + dt_b14,cool)
 N_GOES = 4            # per-cell GOES features per frame
@@ -54,8 +54,8 @@ GRID_R, GRID_C = 59, 95                        # output flood grid (CONUS-land 5
 ENC_DOWN = 8
 ENC_H, ENC_W = 750 // ENC_DOWN, 1250 // ENC_DOWN          # 93 x 156 (stored /2 image)
 
-EPOCHS = 50           # quick first pass
-BATCH_SIZE = 12         # per GPU
+EPOCHS = 50        # quick first pass
+BATCH_SIZE = 16         # per GPU
 WORKERS = 8
 
 LR = 3e-4
@@ -111,32 +111,30 @@ class CellPool(nn.Module):
 ENC_OUT = 128
 
 
-def _r2p1(ci, co):
-    """A factorized (2+1)D block: spatial (1,3,3) then temporal (3,1,1)."""
-    return nn.Sequential(
-        nn.Conv3d(ci, co, (1, 3, 3), padding=(0, 1, 1), bias=False),
-        nn.BatchNorm3d(co), nn.ReLU(inplace=True),
-        nn.Conv3d(co, co, (3, 1, 1), padding=(1, 0, 0), bias=False),
-        nn.BatchNorm3d(co), nn.ReLU(inplace=True),
-    )
-
-
 class Encoder(nn.Module):
-    """R(2+1)D: factorized spatial/temporal 3D convolutions, /8 in space, time -> 1."""
+    """Per-frame 2D CNN + temporal attention pooling over the 8 frames."""
 
-    def __init__(self):
+    def __init__(self, emb=128):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.BatchNorm3d(N_IMG),
-            _r2p1(N_IMG, 32), nn.MaxPool3d((1, 2, 2)),        # 8,375,625
-            _r2p1(32, 64), nn.MaxPool3d((2, 2, 2)),           # 4,187,312
-            _r2p1(64, 128), nn.MaxPool3d((2, 2, 2)),          # 2,93,156
-            nn.Dropout3d(DROPOUT),
-            _r2p1(128, 128), nn.MaxPool3d((2, 1, 1)),         # 1,93,156
+        self.frame = nn.Sequential(
+            nn.BatchNorm2d(N_IMG),
+            nn.Conv2d(N_IMG, 32, 5, padding=2),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True), nn.MaxPool2d(2),   # 375,625
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True), nn.MaxPool2d(2),   # 187,312
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True), nn.MaxPool2d(2),  # 93,156
+            nn.Conv2d(128, emb, 3, padding=1),
+            nn.BatchNorm2d(emb), nn.ReLU(inplace=True), nn.Dropout2d(DROPOUT),
         )
+        self.score = nn.Conv2d(emb, 1, 1)
 
     def forward(self, img):                                   # (B,T,7,H,W)
-        return self.net(img.permute(0, 2, 1, 3, 4)).squeeze(2)
+        B, T = img.shape[:2]
+        f = self.frame(img.flatten(0, 1)).unflatten(0, (B, T))   # (B,T,emb,93,156)
+        a = self.score(f.flatten(0, 1)).unflatten(0, (B, T))     # (B,T,1,93,156)
+        w = torch.softmax(a, dim=1)
+        return (f * w).sum(1)                                 # (B,emb,93,156)
 
 
 # ===========================================================================

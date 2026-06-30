@@ -25,8 +25,9 @@ UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
 # ---------------------------------------------------------------------------
 # Problem definition
 # ---------------------------------------------------------------------------
-# Training years — both fully covered by full-day 3-hourly GOES-16 on /mnt/disk4.
-YEARS = (2019, 2020)
+# Full dataset — 2019-2026, all covered by full-day 3-hourly GOES on /mnt/disk4.
+# Canonical split: train 2019-2024, validate 2025, test 2026 (assigned in nb 01).
+YEARS = (2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026)
 YEAR = YEARS[0]            # back-compat alias for single-year code paths (explore nbs)
 
 # GOES inputs: 5 ABI bands, ALL emissive infrared (brightness temperature, K) so they
@@ -79,7 +80,9 @@ POOL_STRIDE = 2
 # ---------------------------------------------------------------------------
 _YEAR_TAG = "_".join(str(y) for y in YEARS)       # e.g. "2019_2020"
 STATS_PATH = DATA_DIR / f"aux/band_stats_{_YEAR_TAG}.json"
-CACHE_DIR = ROOT / "cache" / f"floodnet_{_YEAR_TAG}"  # project NVMe (fast reads)
+# Single canonical cache (built by nb 01): /2-resolution engineered GOES image stack +
+# per-cell features for 2019-2026, on the root NVMe (fast reads). ~284 GB.
+CACHE_DIR = ROOT / "cache" / "goes_features_2019_2026"   # project NVMe (fast reads)
 POOL_IDX_PATH = CACHE_DIR / f"pool_index_s{POOL_STRIDE}_{CELL_KM}km.npy"
 CKPT_DIR = Path("/mnt/disk1/models/floodnet_convlstm")
 
