@@ -1,6 +1,6 @@
-"""cnn3d trainer on the 50 km GOES/GLM feature grid (config.CACHE_DIR).
+"""convgru_attn trainer on the 50 km GOES/GLM feature grid (config.CACHE_DIR).
 
-Plain 3D-CNN over the feature grid.
+Per-frame 2D CNN + ConvGRU + temporal attention.
 Pure per-cell signatures (no image, no climatology). Inputs: seq (B,8,19,59,95),
 daily summaries (B,8,59,95), lead (B,8); output per-cell flood logits (B,1,59,95).
 Features are normalized (train-only: log1p on GLM, then standardize) inside the model;
@@ -8,7 +8,7 @@ lead time is added as a per-frame channel. Loss = 0.6 focal + 0.3 soft-CSI + 0.1
 spatial-tolerance. Train across both GPUs:
 
     cd notebooks/model
-    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/cnn3d.py
+    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/convgru_attn.py
 
 Metrics: AUPRC(+lift), P/R/F1/CSI (exact + 1-grid); threshold from val, test last.
 """
@@ -43,7 +43,7 @@ from config import CACHE_DIR  # noqa: E402
 # ===========================================================================
 # Hyperparameters
 # ===========================================================================
-NAME = "cnn3d"
+NAME = "convgru_attn"
 N_SEQ = 19            # per-cell per-frame features (cache)
 N_SUM = 8             # per-cell daily-summary features
 SEQ_IN = N_SEQ + 1    # + lead-time channel fed into the encoder
@@ -52,8 +52,8 @@ GRID_R, GRID_C = 59, 95
 SEQ_LOG = (16, 17)    # log1p these seq channels (glm_count, glm_density)
 SUM_LOG = (5, 6)      # log1p these sum channels (glm_daily_count, glm_max_3h)
 
-EPOCHS = 50
-BATCH_SIZE = 16       # per GPU (small batch -> more optimizer steps)
+EPOCHS = 100
+BATCH_SIZE = 10      # per GPU (small batch -> more optimizer steps)
 WORKERS = 8
 LR = 3e-4
 MIN_LR = 1e-5
@@ -65,7 +65,7 @@ LOSS_CSI_W = 0.3
 LOSS_TOL_W = 0.1
 DROPOUT = 0.2
 WEIGHT_DECAY = 1e-2
-PATIENCE = 10
+PATIENCE = 40
 SEED = 0
 
 
@@ -80,35 +80,55 @@ def _collapse_time(x):
     return torch.cat([x.mean(2), x.amax(2), x[:, :, -1]], dim=1)
 
 
+class ConvGRUCell(nn.Module):
+    """One ConvGRU step (lighter than ConvLSTM); conv gates over the spatial grid."""
+
+    def __init__(self, cin, hidden):
+        super().__init__()
+        self.zr = nn.Conv2d(cin + hidden, 2 * hidden, 3, padding=1)
+        self.hh = nn.Conv2d(cin + hidden, hidden, 3, padding=1)
+
+    def forward(self, x, h):
+        z, r = torch.chunk(torch.sigmoid(self.zr(torch.cat([x, h], dim=1))), 2, dim=1)
+        cand = torch.tanh(self.hh(torch.cat([x, r * h], dim=1)))
+        return (1 - z) * h + z * cand
+
+
 
 # ===========================================================================
 # Encoder: (B, T, SEQ_IN, R, C) -> (B, ENC_OUT, R, C)  (keeps the 59x95 grid)
 # ===========================================================================
-ENC_OUT = 384
+ENC_OUT = 64
 
 
 class Encoder(nn.Module):
-    """Plain 3D-CNN over (T, R, C); keeps the 59x95 grid, [mean,max,last] over time."""
+    """Per-frame 2D CNN -> ConvGRU (all hidden states) -> temporal attention."""
 
     def __init__(self):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv3d(SEQ_IN, 64, 3, padding=1),
+        self.frame = nn.Sequential(
+            nn.Conv2d(SEQ_IN, 64, 3, padding=1),
             gn(64), nn.ReLU(inplace=True),
-            nn.Conv3d(64, 96, 3, padding=1),
-            gn(96), nn.ReLU(inplace=True),
-            nn.MaxPool3d((2, 1, 1)),                          # T 8 -> 4
-            nn.Conv3d(96, 128, 3, padding=1),
-            gn(128), nn.ReLU(inplace=True),
-            nn.MaxPool3d((2, 1, 1)),                          # T 4 -> 2
-            nn.Dropout3d(DROPOUT),
-            nn.Conv3d(128, 128, 3, padding=1),
-            gn(128), nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, 3, padding=1),
+            gn(64), nn.ReLU(inplace=True),
         )
+        self.cell = ConvGRUCell(64, ENC_OUT)
+        self.pos = nn.Parameter(torch.zeros(1, T_FRAMES, ENC_OUT, 1, 1))
+        self.attn = nn.Conv2d(ENC_OUT, 1, 1)
+        self.drop = nn.Dropout2d(DROPOUT)
 
     def forward(self, seq):                                   # (B,T,SEQ_IN,R,W)
-        x = seq.permute(0, 2, 1, 3, 4)                        # (B,SEQ_IN,T,R,W)
-        return _collapse_time(self.net(x))                   # (B,3*128,R,W)
+        B, Tn, C, R, W = seq.shape
+        x = self.frame(seq.reshape(B * Tn, C, R, W)).view(B, Tn, 64, R, W)
+        h = x.new_zeros(B, ENC_OUT, R, W)
+        hs = []
+        for tt in range(Tn):
+            h = self.cell(x[:, tt], h)
+            hs.append(h)
+        hs = torch.stack(hs, dim=1) + self.pos               # (B,T,ENC_OUT,R,W)
+        a = self.attn(hs.reshape(B * Tn, ENC_OUT, R, W)).view(B, Tn, 1, R, W)
+        w = torch.softmax(a, dim=1)                          # attention over states
+        return self.drop((hs * w).sum(1))                    # (B,ENC_OUT,R,W)
 
 
 # ===========================================================================

@@ -80,9 +80,9 @@ POOL_STRIDE = 2
 # ---------------------------------------------------------------------------
 _YEAR_TAG = "_".join(str(y) for y in YEARS)       # e.g. "2019_2020"
 STATS_PATH = DATA_DIR / f"aux/band_stats_{_YEAR_TAG}.json"
-# Single canonical cache (built by nb 01): /2-resolution engineered GOES image stack +
-# per-cell features for 2019-2026, on the root NVMe (fast reads). ~284 GB.
-CACHE_DIR = ROOT / "cache" / "goes_features_2019_2026"   # project NVMe (fast reads)
+# Single canonical cache (built by nb 01): pure per-cell 50 km GOES/GLM signature features
+# (seq + daily summaries) for 2019-2026 - no full-resolution image. ~9 GB, root NVMe.
+CACHE_DIR = ROOT / "cache" / "goes_grid50_2019_2026"   # project NVMe (fast reads)
 POOL_IDX_PATH = CACHE_DIR / f"pool_index_s{POOL_STRIDE}_{CELL_KM}km.npy"
 CKPT_DIR = Path("/mnt/disk1/models/floodnet_convlstm")
 
