@@ -1,6 +1,6 @@
-"""resnet3d trainer on the 50 km GOES/GLM feature grid (config.CACHE_DIR).
+"""cnn_attn trainer on the 50 km GOES/GLM feature grid (config.CACHE_DIR).
 
-Small residual 3D net.
+Per-frame 2D CNN + temporal attention.
 Pure per-cell signatures (no image, no climatology). Inputs: seq (B,8,19,59,95),
 daily summaries (B,8,59,95), lead (B,8); output per-cell flood logits (B,1,59,95).
 Features are normalized (train-only: log1p on GLM, then standardize) inside the model;
@@ -8,19 +8,16 @@ lead time is added as a per-frame channel. Loss = 0.6 focal + 0.3 soft-CSI + 0.1
 spatial-tolerance. Train across both GPUs:
 
     cd notebooks/model
-    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/resnet3d.py
+    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 trainers/cnn_attn.py
 
 Metrics: AUPRC(+lift), P/R/F1/CSI (exact + 1-grid); threshold from val, test last.
 """
 import os
-import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("NCCL_P2P_DISABLE", "1")        # PCIe P2P hangs on this box
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -29,22 +26,14 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-ROOT = Path(__file__).resolve().parent
-while not (ROOT / "config.py").exists() and ROOT != ROOT.parent:
-    ROOT = ROOT.parent
-sys.path.insert(0, str(ROOT))
-MODEL_DIR = ROOT / "notebooks" / "model"
-sys.path.insert(0, str(MODEL_DIR))
-OUT_DIR = MODEL_DIR / "outputs"
-from gridindex import build_pix2cell  # noqa: E402
-from foldsplit import fold_splits, fold_suffix  # noqa: E402
-
-from config import CACHE_DIR  # noqa: E402
+from floodlens.config import CACHE_DIR, OUT_DIR  # noqa: E402
+from floodlens.foldsplit import fold_splits, fold_suffix  # noqa: E402
+from floodlens.gridindex import build_pix2cell  # noqa: E402
 
 # ===========================================================================
 # Hyperparameters
 # ===========================================================================
-NAME = "resnet3d"
+NAME = "cnn_attn"
 N_SEQ = 19            # per-cell per-frame features (cache)
 N_SUM = 8             # per-cell daily-summary features
 SEQ_IN = N_SEQ + 1    # + lead-time channel fed into the encoder
@@ -81,48 +70,35 @@ def _collapse_time(x):
     return torch.cat([x.mean(2), x.amax(2), x[:, :, -1]], dim=1)
 
 
-class Res3D(nn.Module):
-    """Residual 3D block (GroupNorm); optional time-stride downsampling, keeps H,W."""
-
-    def __init__(self, cin, cout, tstride=1):
-        super().__init__()
-        self.c1 = nn.Conv3d(cin, cout, 3, stride=(tstride, 1, 1), padding=1)
-        self.n1 = gn(cout)
-        self.c2 = nn.Conv3d(cout, cout, 3, padding=1)
-        self.n2 = gn(cout)
-        proj = nn.Conv3d(cin, cout, 1, stride=(tstride, 1, 1))
-        self.skip = (nn.Sequential(proj, gn(cout))
-                     if (cin != cout or tstride != 1) else nn.Identity())
-
-    def forward(self, x):
-        h = F.relu(self.n1(self.c1(x)), inplace=True)
-        h = self.n2(self.c2(h))
-        return F.relu(h + self.skip(x), inplace=True)
-
-
 
 # ===========================================================================
 # Encoder: (B, T, SEQ_IN, R, C) -> (B, ENC_OUT, R, C)  (keeps the 59x95 grid)
 # ===========================================================================
-ENC_OUT = 384
+ENC_OUT = 128
 
 
 class Encoder(nn.Module):
-    """Small residual 3D net; keeps the 59x95 grid, [mean,max,last] over time."""
+    """Per-frame 2D CNN + temporal pos-embedding + attention over the 8 frames."""
 
     def __init__(self):
         super().__init__()
-        self.stem = nn.Sequential(nn.Conv3d(SEQ_IN, 64, 3, padding=1),
-                                  gn(64), nn.ReLU(inplace=True))
-        self.b1 = Res3D(64, 96, tstride=2)                    # T 8 -> 4
-        self.b2 = Res3D(96, 128, tstride=2)                   # T 4 -> 2
-        self.b3 = Res3D(128, 128, tstride=1)
-        self.drop = nn.Dropout3d(DROPOUT)
+        self.frame = nn.Sequential(
+            nn.Conv2d(SEQ_IN, 64, 3, padding=1),
+            gn(64), nn.ReLU(inplace=True),
+            nn.Conv2d(64, ENC_OUT, 3, padding=1),
+            gn(ENC_OUT), nn.ReLU(inplace=True),
+            nn.Dropout2d(DROPOUT),
+        )
+        self.pos = nn.Parameter(torch.zeros(1, T_FRAMES, ENC_OUT, 1, 1))
+        self.attn = nn.Conv2d(ENC_OUT, 1, 1)
 
     def forward(self, seq):                                   # (B,T,SEQ_IN,R,W)
-        x = seq.permute(0, 2, 1, 3, 4)
-        x = self.b3(self.b2(self.b1(self.stem(x))))
-        return _collapse_time(self.drop(x))                  # (B,3*128,R,W)
+        B, Tn, C, R, W = seq.shape
+        x = self.frame(seq.reshape(B * Tn, C, R, W)).view(B, Tn, ENC_OUT, R, W)
+        x = x + self.pos                                      # inject frame order/lead
+        a = self.attn(x.reshape(B * Tn, ENC_OUT, R, W)).view(B, Tn, 1, R, W)
+        w = torch.softmax(a, dim=1)                           # attention over T
+        return (x * w).sum(1)                                 # (B,ENC_OUT,R,W)
 
 
 # ===========================================================================

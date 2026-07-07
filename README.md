@@ -18,25 +18,25 @@ goes-signatures-for-flood/
 │   ├── flood_warnings/     # floods_unified.parquet (committed) + build intermediates
 │   └── storm_events/       # storm_events_flood.parquet (NCEI observed flood reports)
 │                           # GOES imagery (NetCDF) downloads to /mnt/disk1/goes-data/
+├── floodlens/                      # importable package (editable-installed via pyproject)
+│   ├── config.py                   # shared constants (paths, bands, grid, cache/outputs)
+│   ├── gridindex.py                # GOES-pixel -> 50 km-cell index (shared)
+│   ├── foldsplit.py                # blocked K-fold CV splits (fixed test + rotating val)
+│   ├── run_cv.py                   # CV sweep driver: train each model on every fold (DDP)
+│   ├── trainers/                   # resnet3d, cnn_attn, convgru_attn, xgb
+│   └── download/                   # goes, flood_data, glm (data downloaders, CLI)
 ├── notebooks/
 │   ├── explore/
 │   │   ├── goes_data_explore.ipynb   # GOES imagery: disk inventory, bands, single-frame map
 │   │   ├── flood_data_explore.ipynb  # groundsource + warnings; builds floods_unified.parquet
 │   │   ├── glm_data_explore.ipynb    # GLM flashes: availability, daily counts, density
 │   │   └── goes_vs_floods.ipynb      # combined overlay + time-lapse (clouds, floods, lightning)
-│   └── model/
+│   └── model/                      # the .ipynb pipeline only (imports from floodlens)
 │       ├── 01_prepare_data.ipynb     # build the 50 km feature-grid sample cache (inputs + labels)
-│       ├── run_cv.py                 # CV sweep driver: train each model on every fold (DDP)
 │       ├── 02_model_comparison.ipynb # compare models under K-fold CV (metrics + curves + maps)
-│       ├── 03_vs_nws_warnings.ipynb  # benchmark the model vs NWS flood warnings
-│       ├── foldsplit.py              # blocked K-fold CV splits (fixed test + rotating val)
-│       ├── gridindex.py              # GOES-pixel -> 50 km-cell index (shared)
-│       └── trainers/                 # standalone trainers: resnet3d, cnn_attn, convgru_attn, xgb
-├── src/
-│   ├── download_goes.py            # GOES download script (CLI + importable module)
-│   ├── download_flood_data.py      # ALL flood ground truth: groundsource + warnings + storm events
-│   └── download_glm.py             # GLM lightning flashes -> one parquet/day (/mnt/disk1/glm-data)
-├── config.py                       # shared constants (paths, bands, grid, cache location)
+│       └── 03_vs_nws_warnings.ipynb  # benchmark the model vs NWS flood warnings
+├── outputs/                        # model checkpoints + results (gitignored)
+├── StormArthurEvaluation/          # standalone side experiment (June 2026 same-day model)
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -46,7 +46,7 @@ goes-signatures-for-flood/
 Requires Python ≥ 3.11 and [uv](https://github.com/astral-sh/uv).
 
 ```bash
-uv sync
+uv sync   # also installs the `floodlens` package editable, so notebooks/scripts can `import floodlens`
 ```
 
 Notebook outputs are **not** tracked in git (a [nbstripout](https://github.com/kynan/nbstripout)
@@ -81,23 +81,23 @@ cleanly and pins numpy down:
 
 ### Flood ground truth
 
-Three complementary flood layers, all fetched via `src/download_flood_data.py`
+Three complementary flood layers, all fetched via `floodlens.download.flood_data`
 (`all` runs the three in sequence):
 
 ```bash
 # groundsource flood-extent polygons (~637 MB) from Zenodo -> data/raw/
-uv run python src/download_flood_data.py groundsource
+uv run python -m floodlens.download.flood_data groundsource
 
 # NWS Flash Flood + Areal Flood warning polygons (CONUS, 2019-2026) from IEM
 # -> data/flood_warnings/flood_warnings_conus.parquet
-uv run python src/download_flood_data.py warnings
+uv run python -m floodlens.download.flood_data warnings
 
 # NCEI Storm Events flood reports (observed occurrences, points)
 # -> data/storm_events/storm_events_flood.parquet
-uv run python src/download_flood_data.py storms
+uv run python -m floodlens.download.flood_data storms
 
 # everything above
-uv run python src/download_flood_data.py all
+uv run python -m floodlens.download.flood_data all
 ```
 
 The three layers differ in nature — keep that in mind when using them as labels:
@@ -142,10 +142,10 @@ Imagery is downloaded from NOAA's public AWS S3 buckets (`noaa-goes16`, `noaa-go
 
 ```bash
 # 1 image/day (default)
-uv run python src/download_goes.py estimate
+uv run python -m floodlens.download.goes estimate
 
 # 6 images/day
-uv run python src/download_goes.py estimate --images-per-day 6
+uv run python -m floodlens.download.goes estimate --images-per-day 6
 ```
 
 Expected output (2020 – 2026-02-28):
@@ -165,18 +165,18 @@ Storage               676.1G     115.3G     791.4G
 
 ```bash
 # Dry-run: list every file and report the EXACT total size (no fetching)
-uv run python src/download_goes.py download --dry-run
+uv run python -m floodlens.download.goes download --dry-run
 
 # Full download — default: 6 daytime images/day (16-21 UTC) -> /mnt/disk1/goes-data
-uv run python src/download_goes.py download
+uv run python -m floodlens.download.goes download
 
 # Custom date range or hour
-uv run python src/download_goes.py download \
+uv run python -m floodlens.download.goes download \
   --start-date 2023-01-01 --end-date 2023-12-31 \
   --workers 32
 
 # 1 image/day, or a custom location (override the 6/day + path defaults)
-uv run python src/download_goes.py download --hour 18 --data-dir /some/other/path
+uv run python -m floodlens.download.goes download --hour 18 --data-dir /some/other/path
 ```
 
 Downloads are resumable — already-downloaded files are skipped automatically. Files are saved to `/mnt/disk1/goes-data/GOES{16|19}/YYYY/MM/DD/` by default (override with `--data-dir`).
@@ -194,7 +194,7 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 4. **Compare** — `explore/goes_vs_floods.ipynb` overlays the GOES time-lapse, the
    CONUS grid, and the next-day floods on one interactive map.
 5. **Model** — the `notebooks/model/` pipeline: `01_prepare_data` builds the
-   feature-grid cache, `run_cv.py` trains the model suite across all CV folds, and
+   feature-grid cache, `floodlens.run_cv` trains the model suite across all CV folds, and
    `02_model_comparison` / `03_vs_nws_warnings` evaluate them (see **Modeling** below).
 
 ## Modeling
@@ -223,13 +223,12 @@ train-only statistics.
 DDP, tabular on CPU):
 
 ```bash
-cd notebooks/model
-python run_cv.py                  # full sweep (resumable; skips finished folds)
-python run_cv.py --models xgb     # just the tabular baseline, all folds
-python run_cv.py --force          # retrain everything
+python -m floodlens.run_cv                  # full sweep (resumable; skips finished folds)
+python -m floodlens.run_cv --models xgb     # just the tabular baseline, all folds
+python -m floodlens.run_cv --force          # retrain everything
 ```
 
-Artifacts land in `notebooks/model/outputs/` (`<name>_f<k>.pt`/`.pkl` + deep
+Artifacts land in `outputs/` (`<name>_f<k>.pt`/`.pkl` + deep
 `<name>_f<k>_results.npz`, all gitignored). Then open `02_model_comparison.ipynb` for
 the CV metrics table (AUPRC mean ± std + ensemble) and `03_vs_nws_warnings.ipynb` for
 the operational-warning benchmark.

@@ -49,10 +49,10 @@ cached under data/storm_events/raw/ and only re-downloaded on a new stamp.
 All subcommands are idempotent / resumable.
 
 CLI:
-  python src/download_flood_data.py warnings [--start-year ... --workers ...]
-  python src/download_flood_data.py groundsource [--dest PATH --force]
-  python src/download_flood_data.py storms [--start-year ... --types ...]
-  python src/download_flood_data.py all [--start-year ... --end-year ...]
+  python -m floodlens.download.flood_data warnings [--start-year ... --workers ...]
+  python -m floodlens.download.flood_data groundsource [--dest PATH --force]
+  python -m floodlens.download.flood_data storms [--start-year ... --types ...]
+  python -m floodlens.download.flood_data all [--start-year ... --end-year ...]
 """
 
 import argparse

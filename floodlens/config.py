@@ -2,7 +2,7 @@
 
 Import the constants you need, e.g.::
 
-    from config import CACHE_DIR, BANDS, CELL_KM
+    from floodlens.config import CACHE_DIR, BANDS, CELL_KM
 
 The single most important lever is ``CELL_KM`` — the output cell size (km).
 Everything downstream (cell polygons, label maps, the pixel->cell pooling index)
@@ -11,8 +11,8 @@ is derived from it, so changing it here changes the whole project consistently.
 
 from pathlib import Path
 
-# repo root (this file lives at the root)
-ROOT = Path(__file__).resolve().parent
+# repo root (this file lives in floodlens/, one level down)
+ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Storage — large data/artifacts live on /mnt/disk1 (see CLAUDE.md)
@@ -26,7 +26,7 @@ UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
 # Problem definition
 # ---------------------------------------------------------------------------
 # Full dataset — 2019-2025 on full-day 3-hourly GOES; 2026 dropped (truncated labels).
-# Splits are NOT static: notebooks/model/foldsplit.py does blocked K-fold CV (one fixed
+# Splits are NOT static: floodlens/foldsplit.py does blocked K-fold CV (one fixed
 # test set + rotating train/val folds) computed at train time. nb 01 only marks 2026 "unused".
 YEARS = (2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026)
 YEAR = YEARS[0]            # back-compat alias for single-year code paths (explore nbs)
@@ -60,8 +60,9 @@ CELL_KM = 50
 # Single canonical cache (built by nb 01): pure per-cell 50 km GOES/GLM signature features
 # (seq + daily summaries) for 2019-2025 - no full-resolution image. ~9 GB, root NVMe.
 # Training hyperparameters, loss, and the CV split all live with the trainers /
-# foldsplit.py, not here (each trainer is self-contained; see notebooks/model/).
+# foldsplit.py, not here (each trainer is self-contained; see floodlens/trainers/).
 CACHE_DIR = ROOT / "cache" / "goes_grid50_2019_2026"   # project NVMe (fast reads)
+OUT_DIR = ROOT / "outputs"                             # model checkpoints + results (gitignored)
 
 # ---------------------------------------------------------------------------
 # Output grid — generated fresh on every call, never stored. Square CELL_KM

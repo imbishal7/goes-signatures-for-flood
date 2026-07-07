@@ -5,17 +5,10 @@ Shared by every model trainer (`trainers/*.py`) and `model_results.ipynb`:
 grid (CONUS Albers), caching the result to disk. The heavy pyproj projection math lives
 here, in one canonical place, so the trainers stay self-contained otherwise.
 """
-import sys
-from pathlib import Path
 
 import numpy as np
 
-# config.py (repo root) is the single source for the grid + paths
-ROOT = Path(__file__).resolve().parent
-while not (ROOT / "config.py").exists() and ROOT != ROOT.parent:
-    ROOT = ROOT.parent
-sys.path.insert(0, str(ROOT))
-from config import (  # noqa: E402
+from floodlens.config import (
     CACHE_DIR,
     CELL_KM,
     DATA_DIR,

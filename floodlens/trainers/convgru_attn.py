@@ -13,14 +13,11 @@ spatial-tolerance. Train across both GPUs:
 Metrics: AUPRC(+lift), P/R/F1/CSI (exact + 1-grid); threshold from val, test last.
 """
 import os
-import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("NCCL_P2P_DISABLE", "1")        # PCIe P2P hangs on this box
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -29,17 +26,9 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-ROOT = Path(__file__).resolve().parent
-while not (ROOT / "config.py").exists() and ROOT != ROOT.parent:
-    ROOT = ROOT.parent
-sys.path.insert(0, str(ROOT))
-MODEL_DIR = ROOT / "notebooks" / "model"
-sys.path.insert(0, str(MODEL_DIR))
-OUT_DIR = MODEL_DIR / "outputs"
-from gridindex import build_pix2cell  # noqa: E402
-from foldsplit import fold_splits, fold_suffix  # noqa: E402
-
-from config import CACHE_DIR  # noqa: E402
+from floodlens.config import CACHE_DIR, OUT_DIR  # noqa: E402
+from floodlens.foldsplit import fold_splits, fold_suffix  # noqa: E402
+from floodlens.gridindex import build_pix2cell  # noqa: E402
 
 # ===========================================================================
 # Hyperparameters

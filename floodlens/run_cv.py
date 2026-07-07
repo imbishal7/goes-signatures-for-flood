@@ -4,12 +4,12 @@ Deep models train across both GPUs (DDP via torchrun, nproc=2); tabular models
 run single-process. Each (model, fold) writes fold-keyed artifacts to outputs/
 (``<name>_f<k>.pt`` / ``.pkl`` + deep ``<name>_f<k>_results.npz``), so the run is
 **resumable** — an existing artifact is skipped unless ``--force``. Fold splits
-and the leakage-safe per-fold normalization stats come from foldsplit.py.
+and the leakage-safe per-fold normalization stats come from floodlens.foldsplit.
 
-    cd notebooks/model
-    python run_cv.py                          # full sweep: 7 models x 10 folds
-    python run_cv.py --models xgb --folds 0 1            # sanity subset
-    python run_cv.py --epochs 2 --models resnet3d --folds 0  # deep smoke test
+    # from the repo root:
+    python -m floodlens.run_cv                              # full sweep: 4 models x 6 folds
+    python -m floodlens.run_cv --models xgb --folds 0 1     # sanity subset
+    python -m floodlens.run_cv --epochs 2 --models resnet3d --folds 0  # deep smoke test
 """
 import argparse
 import os
@@ -18,9 +18,10 @@ import sys
 import time
 from pathlib import Path
 
+from floodlens.config import OUT_DIR
+
 HERE = Path(__file__).resolve().parent
-TRAINERS = HERE / "trainers"
-OUT_DIR = HERE / "outputs"
+REPO = HERE.parent                    # repo root — run trainers as -m floodlens.trainers.*
 
 DEEP = ["resnet3d", "cnn_attn", "convgru_attn"]
 TAB = ["xgb"]
@@ -60,15 +61,15 @@ def main() -> int:
         if args.epochs is not None:
             env["EPOCHS"] = str(args.epochs)
         if model in DEEP:
-            # torch.distributed.run == torchrun, but always resolvable via this python
+            # torchrun (torch.distributed.run) launching the trainer as a module
             cmd = [sys.executable, "-m", "torch.distributed.run",
-                   "--nproc_per_node=2", f"trainers/{model}.py"]
+                   "--nproc_per_node=2", "-m", f"floodlens.trainers.{model}"]
         else:
-            cmd = [sys.executable, f"trainers/{model}.py"]
+            cmd = [sys.executable, "-m", f"floodlens.trainers.{model}"]
 
         print(f"{tag}: RUN  {' '.join(cmd)}", flush=True)
         ts = time.perf_counter()
-        r = subprocess.run(cmd, cwd=HERE, env=env)
+        r = subprocess.run(cmd, cwd=REPO, env=env)
         dt = time.perf_counter() - ts
         if r.returncode == 0 and out.exists():
             print(f"{tag}: OK ({dt/60:.1f} min)", flush=True)

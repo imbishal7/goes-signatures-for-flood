@@ -142,13 +142,7 @@ def describe(cache_dir):
 
 
 if __name__ == "__main__":
-    import sys
-
-    ROOT = Path(__file__).resolve().parent
-    while not (ROOT / "config.py").exists() and ROOT != ROOT.parent:
-        ROOT = ROOT.parent
-    sys.path.insert(0, str(ROOT))
-    from config import CACHE_DIR
+    from floodlens.config import CACHE_DIR
 
     for k in range(N_FOLDS):
         os.environ["FOLD"] = str(k)

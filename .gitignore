@@ -52,4 +52,4 @@ CLAUDE.md
 /StormArthurEvaluation/cache/
 
 # model checkpoints + results from the notebook trainers — generated, never committed
-/notebooks/model/outputs/
+/outputs/
