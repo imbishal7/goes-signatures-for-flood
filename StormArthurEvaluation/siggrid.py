@@ -1,8 +1,8 @@
-"""Self-contained output-grid helper for the standalone ``signatures/`` experiment.
+"""Self-contained output-grid helper for the standalone ``StormArthurEvaluation/`` experiment.
 
 Copied from the repo-root ``config.py`` so this sub-project has no dependency on the
 main pipeline — it can be run (or moved out) on its own. Defines the CELL_KM square-cell
-CONUS-land grid and the constants the signatures notebooks/scripts import.
+CONUS-land grid and the constants the StormArthurEvaluation notebooks/scripts import.
 """
 from pathlib import Path
 

@@ -1,8 +1,8 @@
-# June same-day ConvLSTM — model overview
+# Storm Arthur same-day ConvLSTM — model overview
 
 **Task.** From one **CST day**'s GOES imagery, predict that day's NWS flood-warning grid.
-Defined in [`notebooks/convlstm_june_train.py`](notebooks/convlstm_june_train.py); orchestrated by
-[`notebooks/train_convlstm_june.ipynb`](notebooks/train_convlstm_june.ipynb). `B` = batch per GPU.
+Defined in [`notebooks/convlstm_arthur_train.py`](notebooks/convlstm_arthur_train.py) (standalone,
+run via torchrun); evaluated in [`notebooks/results_cnn3d.ipynb`](notebooks/results_cnn3d.ipynb). `B` = batch per GPU.
 
 Grid: 50 km CONUS-land, **R×C = 59×95** (5,605 cells, **3,360 over land** — loss/metrics on land only).
 
@@ -61,7 +61,7 @@ Everything upstream of `CellPool` (the GOES Encoder→ConvLSTM path) is **identi
 GLM only adds 3 channels at the cell grid just before the head. There is **no climatology or
 location prior** — the per-cell prediction comes purely from the imagery (and GLM, if enabled).
 
-## On-disk cache (per CST day, `signatures/cache/convlstm_june/`)
+## On-disk cache (per CST day, `StormArthurEvaluation/cache/storm_arthur/`)
 
 | file | shape / dtype |
 |---|---|

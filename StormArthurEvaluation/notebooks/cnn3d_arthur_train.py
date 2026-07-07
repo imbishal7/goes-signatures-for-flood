@@ -1,23 +1,18 @@
-"""Standalone trainer for a simple same-day ConvLSTM flood model (June 2026).
+"""Standalone trainer for a simple same-day 3D-CNN flood model (Storm Arthur, June 2026).
 
 Task: from one CDT day's GOES imagery (24 hourly frames, all 16 ABI bands by
 default) predict that day's NWS flood-warning grid (per-cell flood probability).
-
-This is the recurrent sibling of cnn3d_june_train.py — same task, data, loss, LR
-schedule and DDP setup; the only difference is the temporal model. Instead of a
-3D CNN convolving over time, a shared 2D CNN encodes each frame and a ConvLSTM
-walks the 24 frames, carrying a hidden state that summarises the whole day.
 
 Everything — model, data, hyperparameters, training loop — lives in this one
 file. It trains across both GPUs with DistributedDataParallel; launch it with
 torchrun (one process per GPU):
 
-    cd signatures/notebooks
-    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 convlstm_june_train.py
+    cd StormArthurEvaluation/notebooks
+    NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 cnn3d_arthur_train.py
 
-(Single-GPU also works: `python convlstm_june_train.py`.)
+(Single-GPU also works: `python cnn3d_arthur_train.py`.)
 
-It reuses the day-cache (model-agnostic):
+It reuses the day-cache built for the ConvLSTM run (model-agnostic):
     {CACHE_DIR}/{day}_x.npy   (24, 16, 1500, 2500) float16   GOES cube
     {CACHE_DIR}/{day}_y.npy   (59, 95) uint8                 warning grid
     {CACHE_DIR}/manifest.parquet                             train/val/test split
@@ -37,15 +32,15 @@ from sklearn.metrics import average_precision_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-# standalone: the output grid lives in signatures/siggrid.py (no repo config.py).
-SIG_ROOT = Path(__file__).resolve().parent.parent          # signatures/
+# standalone: the output grid lives in StormArthurEvaluation/siggrid.py (no repo config.py).
+SIG_ROOT = Path(__file__).resolve().parent.parent          # StormArthurEvaluation/
 sys.path.insert(0, str(SIG_ROOT))
 from siggrid import build_grid_cells  # noqa: E402
 
 # ===========================================================================
-# Hyperparameters & settings
+# Hyperparameters & settings 
 # ===========================================================================
-CACHE_DIR = SIG_ROOT / "cache/convlstm_june"   # shared day-cache
+CACHE_DIR = SIG_ROOT / "cache/storm_arthur"   # shared day-cache
 
 # Which ABI bands to feed, as 1-indexed band numbers (1..16). Default = all 16.
 # e.g. BANDS = (2, 3, 7, 10, 13, 16) for the curated set.
@@ -57,11 +52,8 @@ GRID_R, GRID_C = 59, 95       # output flood grid (CONUS-land 50 km cells)
 # CellPool regrids those pixels onto the 50 km grid. /8 leaves ~10 pixels per cell
 # (finer than the grid) so the geographic pooling has enough pixels to average.
 ENC_H, ENC_W = 1500 // 8, 2500 // 8           # 187 x 312
-HIDDEN = 64                   # ConvLSTM hidden channels (= encoder output channels).
-                              # gates conv scales with HIDDEN**2, so this is the main
-                              # size lever: 64 -> ~0.5M params, 128 -> ~1.5M.
 
-EPOCHS = 50
+EPOCHS = 15
 BATCH_SIZE = 1                 # per GPU. each cube is ~2.9 GB f16; bump if VRAM allows
 WORKERS = 4                    # dataloader processes
 
@@ -119,86 +111,77 @@ class CellPool(nn.Module):
 # ===========================================================================
 # Model
 # ===========================================================================
-class GOESConvLSTM(nn.Module):
-    """Per-frame 2D CNN encoder -> ConvLSTM over time -> CellPool regrid -> head.
+class GOES3DCNN(nn.Module):
+    """Conv3d stem over (time, H, W) -> collapse time -> CellPool regrid -> head.
 
     Input  : (B, T=24, C=n_bands, 1500, 2500)
     Output : (B, 1, GRID_R, GRID_C) raw logits (apply sigmoid for probability).
 
-    The encoder (shared weights across frames) shrinks each frame to /8 (187x312);
-    the ConvLSTM walks the 24 encoded frames; its final hidden state — a summary of
-    the whole day — is regridded onto the 50 km grid by CellPool, then a 2D head
-    produces the per-cell logit.
+    Spatial pooling stops at /8 (187x312); the temporal axis is collapsed 24->1;
+    then CellPool maps those pixels onto the 50 km grid and a 2D head produces the
+    per-cell logit (so the head runs on the grid, like the old CellPool models).
     """
 
-    def __init__(self, n_bands, hidden=HIDDEN):
+    def __init__(self, n_bands):
         super().__init__()
-        self.hidden = hidden
 
-        # --- per-frame encoder: (B, n_bands, 1500, 2500) -> (B, hidden, 187, 312) ---
         self.encoder = nn.Sequential(
             # normalise the heterogeneous band scales (reflectance vs brightness-temp)
-            nn.BatchNorm2d(n_bands),
-
-            nn.Conv2d(n_bands, 32, kernel_size=5, padding=2),
-            nn.BatchNorm2d(32),
+            nn.BatchNorm3d(n_bands),
+            # Input: B, n_bands, 24, 1500, 2500
+            nn.Conv3d(n_bands, 32, kernel_size=(3, 5, 5), padding=(1, 2, 2)),
+            nn.BatchNorm3d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2),                  # 1500x2500 -> 750x1250
+            nn.MaxPool3d(kernel_size=(1, 2, 2)),
+            # B, 32, 24, 750, 1250
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv3d(32, 64, kernel_size=(3, 3, 3), padding=1),
+            nn.BatchNorm3d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2),                  # -> 375x625
+            nn.MaxPool3d(kernel_size=(2, 2, 2)),
+            # B, 64, 12, 375, 625
 
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
+            nn.Conv3d(64, 128, kernel_size=(3, 3, 3), padding=1),
+            nn.BatchNorm3d(128),
             nn.ReLU(),
-            nn.MaxPool2d(2),                  # -> 187x312  (/8 — stop shrinking space)
+            nn.MaxPool3d(kernel_size=(2, 2, 2)),
+            # B, 128, 6, 187, 312   (spatial now at /8 — stop shrinking space here)
 
-            nn.Conv2d(128, hidden, kernel_size=3, padding=1),
-            nn.BatchNorm2d(hidden),
-            nn.ReLU(),                        # -> 187x312  (no pool; keep /8)
+            nn.Conv3d(128, 256, kernel_size=(3, 3, 3), padding=1),
+            nn.BatchNorm3d(256),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=(2, 1, 1)),
+            # B, 256, 3, 187, 312   (time only)
+
+            nn.Conv3d(256, 256, kernel_size=(3, 3, 3), padding=1),
+            nn.BatchNorm3d(256),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=(3, 1, 1)),
+            # B, 256, 1, 187, 312   (time fully collapsed: 24 -> 1, space kept at /8)
         )
-
-        # --- ConvLSTM gate convolution: from [encoded frame, prev hidden] -> 4 gates ---
-        # (input, forget, output, candidate), each `hidden` channels.
-        self.gates = nn.Conv2d(hidden + hidden, 4 * hidden, kernel_size=3, padding=1)
 
         self.pool = CellPool()                # regrid 187x312 pixels -> 59x95 cells
 
-        # --- 2D head: hidden-channel day-summary -> one flood logit per cell ---
         self.head = nn.Sequential(            # runs on the cell grid (59x95)
-            nn.Conv2d(hidden, 64, kernel_size=3, padding=1),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
 
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-
-            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Conv2d(64, 1, kernel_size=1),
         )
 
     def forward(self, x):
-        # x: B, T, n_bands, 1500, 2500
-        B, T = x.shape[:2]
-
-        # encode every frame with the shared 2D CNN
-        feats = [self.encoder(x[:, t]) for t in range(T)]    # each: B, hidden, h, w
-
-        # ConvLSTM: walk the frames, carrying hidden state h and cell state c
-        h = torch.zeros_like(feats[0])
-        c = torch.zeros_like(feats[0])
-        for t in range(T):
-            gates = self.gates(torch.cat([feats[t], h], dim=1))   # B, 4*hidden, h, w
-            i, f, o, g = gates.chunk(4, dim=1)                    # the four LSTM gates
-            c = f.sigmoid() * c + i.sigmoid() * g.tanh()          # update cell state
-            h = o.sigmoid() * c.tanh()                            # update hidden state
-
-        # h now summarises the whole day -> regrid to cells -> per-cell logit
-        out = self.pool(h)                                       # B, hidden, 59, 95
-        out = self.head(out)                                     # B, 1, 59, 95
-        return out                                              # B, 1, GRID_R, GRID_C
+        # x: B, 24, n_bands, 1500, 2500
+        x = x.permute(0, 2, 1, 3, 4)          # -> B, n_bands, 24, 1500, 2500
+        x = self.encoder(x)                   # -> B, 256, 1, ENC_H, ENC_W
+        x = x.squeeze(2)                      # -> B, 256, ENC_H, ENC_W
+        x = self.pool(x)                      # -> B, 256, GRID_R, GRID_C  (CellPool)
+        x = self.head(x)                      # -> B, 1, GRID_R, GRID_C
+        return x                              # logits
 
 
 # ===========================================================================
@@ -277,7 +260,7 @@ def main():
     tr_days, va_days, te_days = load_splits()
 
     # SyncBatchNorm: per-GPU batch is tiny (1 cube), so sync BN stats across GPUs.
-    net = GOESConvLSTM(n_bands=len(BANDS)).to(dev)
+    net = GOES3DCNN(n_bands=len(BANDS)).to(dev)
     if ddp:
         net = nn.SyncBatchNorm.convert_sync_batchnorm(net)
     model = DDP(net, device_ids=[local]) if ddp else net
@@ -339,11 +322,11 @@ def main():
             dist.barrier()                                 # keep ranks in lockstep
 
     if is_main:
-        ckpt = ROOT / "signatures/notebooks/convlstm_june.pt"
+        ckpt = SIG_ROOT / "notebooks/cnn3d_arthur.pt"
         torch.save(net.state_dict(), ckpt)
         # training history for plotting later (epoch, lr, train_loss, test_prauc)
-        np.savez(CACHE_DIR / "convlstm_results.npz", hist=np.array(hist, np.float32))
-        print(f"saved {ckpt} + convlstm_results.npz", flush=True)
+        np.savez(CACHE_DIR / "cnn3d_results.npz", hist=np.array(hist, np.float32))
+        print(f"saved {ckpt} + cnn3d_results.npz", flush=True)
     if ddp:
         dist.destroy_process_group()
 

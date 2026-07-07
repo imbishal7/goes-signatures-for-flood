@@ -48,8 +48,8 @@ CLAUDE.md
 # large generated sample cache (notebook 01) — kept on the project NVMe, never committed
 /cache/
 
-# June "signatures" work: full-res all-band CST cache lives on the project drive, never committed
-/signatures/cache/
+# June "StormArthurEvaluation" work: full-res all-band CST cache lives on the project drive, never committed
+/StormArthurEvaluation/cache/
 
 # model checkpoints + results from the notebook trainers — generated, never committed
 /notebooks/model/outputs/
