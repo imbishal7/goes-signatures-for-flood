@@ -25,12 +25,18 @@ goes-signatures-for-flood/
 │   │   ├── glm_data_explore.ipynb    # GLM flashes: availability, daily counts, density
 │   │   └── goes_vs_floods.ipynb      # combined overlay + time-lapse (clouds, floods, lightning)
 │   └── model/
-│       ├── 01_prepare_data.ipynb     # build model inputs/outputs + materialize the sample cache
-│       └── 02_train_model.ipynb      # ConvLSTM: DDP train/val/test (Tversky loss)
+│       ├── 01_prepare_data.ipynb     # build the 50 km feature-grid sample cache (inputs + labels)
+│       ├── run_cv.py                 # CV sweep driver: train each model on every fold (DDP)
+│       ├── 02_model_comparison.ipynb # compare models under K-fold CV (metrics + curves + maps)
+│       ├── 03_vs_nws_warnings.ipynb  # benchmark the model vs NWS flood warnings
+│       ├── foldsplit.py              # blocked K-fold CV splits (fixed test + rotating val)
+│       ├── gridindex.py              # GOES-pixel -> 50 km-cell index (shared)
+│       └── trainers/                 # standalone trainers: resnet3d, cnn_attn, convgru_attn, xgb
 ├── src/
 │   ├── download_goes.py            # GOES download script (CLI + importable module)
 │   ├── download_flood_data.py      # ALL flood ground truth: groundsource + warnings + storm events
 │   └── download_glm.py             # GLM lightning flashes -> one parquet/day (/mnt/disk1/glm-data)
+├── config.py                       # shared constants (paths, bands, grid, cache location)
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -188,7 +194,45 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 4. **Compare** — `explore/goes_vs_floods.ipynb` overlays the GOES time-lapse, the
    CONUS grid, and the next-day floods on one interactive map.
 5. **Model** — the `notebooks/model/` pipeline: `01_prepare_data` builds the
-   sample cache and `02_train_model` trains the ConvLSTM.
+   feature-grid cache, `run_cv.py` trains the model suite across all CV folds, and
+   `02_model_comparison` / `03_vs_nws_warnings` evaluate them (see **Modeling** below).
+
+## Modeling
+
+**Task (v1).** From a CDT day **D−1** GOES/GLM observation, predict which **50 km
+CONUS-land cells** are **flooded** on day **D**. Labels are *observed* floods —
+groundsource news-report extents ∪ NCEI storm events — on a **59 × 95** grid
+(3,360 land cells). `01_prepare_data.ipynb` materializes a per-cell feature-grid cache
+(`cache/goes_grid50_2019_2026/`): 8 frames/day × 19 per-cell GOES/GLM features, plus
+daily summaries and a lead-time channel.
+
+**Evaluation — blocked K-fold cross-validation** (`foldsplit.py`). One **fixed
+held-out test set** (~10% of months, interleaved so it spans all of 2019–2025) plus
+**6 CV folds** over the rest: each fold rotates one block as validation (~15%) and
+trains on the others (~75%), with a ±3-day buffer so no multi-day event straddles a
+train/eval boundary. Every split spans all 7 years with matched base rates, so results
+are reported as **mean ± std across folds** plus a **6-fold ensemble**.
+
+**Models (4).** Three deep encoders over the feature grid — a small 3D-ResNet
+(`resnet3d`), a per-frame CNN + temporal attention (`cnn_attn`), and a ConvGRU +
+attention (`convgru_attn`) — plus an **XGBoost** per-cell baseline (`xgb`). Each trainer
+is standalone and reads the shared cache; deep models normalize inputs with per-fold,
+train-only statistics.
+
+**Run the sweep** (4 models × 6 folds = 24 runs; deep models train across both GPUs via
+DDP, tabular on CPU):
+
+```bash
+cd notebooks/model
+python run_cv.py                  # full sweep (resumable; skips finished folds)
+python run_cv.py --models xgb     # just the tabular baseline, all folds
+python run_cv.py --force          # retrain everything
+```
+
+Artifacts land in `notebooks/model/outputs/` (`<name>_f<k>.pt`/`.pkl` + deep
+`<name>_f<k>_results.npz`, all gitignored). Then open `02_model_comparison.ipynb` for
+the CV metrics table (AUPRC mean ± std + ensemble) and `03_vs_nws_warnings.ipynb` for
+the operational-warning benchmark.
 
 ## Notebooks
 
@@ -200,8 +244,9 @@ Launch with `uv run jupyter lab`.
 | [notebooks/explore/goes_data_explore.ipynb](notebooks/explore/goes_data_explore.ipynb) | Explore downloaded GOES imagery: disk inventory, pick a date/file, view any band or a true-color RGB, overlay a frame on an interactive folium map, crop to a region |
 | [notebooks/explore/glm_data_explore.ipynb](notebooks/explore/glm_data_explore.ipynb) | Explore GLM lightning flashes: days built so far, flashes/day time series, one day in detail (stats, diurnal cycle, spatial density) |
 | [notebooks/explore/goes_vs_floods.ipynb](notebooks/explore/goes_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
-| [notebooks/model/01_prepare_data.ipynb](notebooks/model/01_prepare_data.ipynb) | Build the model's inputs (prev-day GOES 16-band sequence; GLM cached but currently unused) and outputs (next-day flood map on the 50 km grid), printing every shape, then materialize a fast on-disk sample cache |
-| [notebooks/model/02_train_model.ipynb](notebooks/model/02_train_model.ipynb) | Train the `FloodConvLSTM` (conv encoder → ConvLSTM → exact pixel→cell pooling → head) on the cache with a Tversky loss (α>β, precision-favoring) and binary metrics (F1/IoU), DDP across both GPUs; train/val/test |
+| [notebooks/model/01_prepare_data.ipynb](notebooks/model/01_prepare_data.ipynb) | Build the model's inputs (CDT day D−1 GOES/GLM per-cell features, 8 frames/day + daily summaries + lead time) and labels (day-D observed floods on the 50 km grid), printing every shape, then materialize the fast on-disk feature-grid cache |
+| [notebooks/model/02_model_comparison.ipynb](notebooks/model/02_model_comparison.ipynb) | Compare the model suite under 6-fold CV: reload every fold checkpoint, report AUPRC mean ± std (val for selection, fixed test for the honest comparison) + a 6-fold ensemble, plus per-fold training curves and prediction maps |
+| [notebooks/model/03_vs_nws_warnings.ipynb](notebooks/model/03_vs_nws_warnings.ipynb) | Benchmark the model (K-fold ensemble) against NWS Flash-Flood + Areal-Flood warnings on the fixed test set: metrics vs observed floods, who-catches-what coverage, per-day maps, and aggregate spatial views |
 
 ## Band Reference
 

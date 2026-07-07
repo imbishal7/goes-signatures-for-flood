@@ -25,8 +25,9 @@ UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
 # ---------------------------------------------------------------------------
 # Problem definition
 # ---------------------------------------------------------------------------
-# Full dataset — 2019-2026, all covered by full-day 3-hourly GOES on /mnt/disk4.
-# Canonical split: train 2019-2024, validate 2025, test 2026 (assigned in nb 01).
+# Full dataset — 2019-2025 on full-day 3-hourly GOES; 2026 dropped (truncated labels).
+# Splits are NOT static: notebooks/model/foldsplit.py does blocked K-fold CV (one fixed
+# test set + rotating train/val folds) computed at train time. nb 01 only marks 2026 "unused".
 YEARS = (2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026)
 YEAR = YEARS[0]            # back-compat alias for single-year code paths (explore nbs)
 
@@ -46,75 +47,21 @@ YEAR = YEARS[0]            # back-compat alias for single-year code paths (explo
 BANDS = (8, 10, 11, 14, 15)
 N_BAND = len(BANDS)
 
-# per-frame GOES channels: the 5 bands, optionally + a per-frame lead-time channel
-#   USE_TIME — append each frame's lead time (whole hours before day D's UTC start,
-#              i.e. D 00:00 UTC, from _t.npy) as one extra channel, so the model knows
-#              how far ahead of the flood each frame sits.
-USE_TIME = True
-N_CH = N_BAND + (1 if USE_TIME else 0)            # GOES channels per frame (= 6)
+# per-frame GOES: the 5 bands + a per-frame lead-time channel (hours before day D,
+# from _t.npy). The 50 km feature cache (nb 01) pools these to per-cell features.
 T_FRAMES = 8                                      # 3-hourly frames/day, full UTC day (00,03,..,21Z)
 IMG_H, IMG_W = 1500, 2500                         # ABI CONUS 2 km grid (rows, cols)
-
-# GLM lightning (DEFERRED): a SEPARATE input stream (not a GOES channel) — the
-# full input day binned into GLM_HOURS hourly maps on the CELL_KM grid, GLM_FEATS
-# features each [flash count, total energy, total area], plus per-hour lead times.
-# Not built in nb1 and excluded from the model for now (the `area` feature is
-# mis-scaled at the source for ~Jan 2019); constants kept for when we re-add it.
-USE_GLM = False
-GLM_HOURS = 24
-GLM_FEATS = 3                                      # count, energy, area
 
 # >>> OUTPUT GRID SIZE LEVER <<<
 # Square output cells CELL_KM on a side, generated directly over CONUS land in
 # an equal-area projection (see build_grid_cells). Any size works: 50, 40, 75...
 CELL_KM = 50
 
-# ---- model (notebook 02) ----
-# A shared per-frame conv encoder downsamples to IMG // POOL_STRIDE, a ConvLSTM
-# fuses the T frames, then pixel->cell pooling maps onto the CELL_KM grid.
-POOL_STRIDE = 2
-
-# ---------------------------------------------------------------------------
-# Derived artifact paths (depend on YEARS / CELL_KM so changing the grid or the year
-# span never silently reuses a stale cache)
-# ---------------------------------------------------------------------------
-_YEAR_TAG = "_".join(str(y) for y in YEARS)       # e.g. "2019_2020"
-STATS_PATH = DATA_DIR / f"aux/band_stats_{_YEAR_TAG}.json"
 # Single canonical cache (built by nb 01): pure per-cell 50 km GOES/GLM signature features
-# (seq + daily summaries) for 2019-2026 - no full-resolution image. ~9 GB, root NVMe.
+# (seq + daily summaries) for 2019-2025 - no full-resolution image. ~9 GB, root NVMe.
+# Training hyperparameters, loss, and the CV split all live with the trainers /
+# foldsplit.py, not here (each trainer is self-contained; see notebooks/model/).
 CACHE_DIR = ROOT / "cache" / "goes_grid50_2019_2026"   # project NVMe (fast reads)
-POOL_IDX_PATH = CACHE_DIR / f"pool_index_s{POOL_STRIDE}_{CELL_KM}km.npy"
-CKPT_DIR = Path("/mnt/disk1/models/floodnet_convlstm")
-
-# ---------------------------------------------------------------------------
-# Train / val / test split (random, reproducible) — notebook 01
-# ---------------------------------------------------------------------------
-SPLIT_SEED = 0
-SPLIT_FRACS = (0.70, 0.20, 0.10)                  # train / val / test
-
-# ---------------------------------------------------------------------------
-# Training hyper-parameters — notebook 02
-# ---------------------------------------------------------------------------
-BATCH_PER_GPU = 1                             # at POOL_STRIDE=2 (finer /2 encoder grid, ~4x activation memory)
-EPOCHS = 2
-LR = 3e-4
-WORKERS = 8
-
-# ---------------------------------------------------------------------------
-# Loss & metrics — Tversky (soft IoU/F1) on hard 0/1 targets
-# ---------------------------------------------------------------------------
-# loss = 1 - TP / (TP + ALPHA*FP + BETA*FN), over the land cells.
-#   ALPHA weights false positives, BETA weights false negatives:
-#     ALPHA > BETA -> penalize over-prediction (precision-favoring)
-#     ALPHA = BETA -> Dice loss
-#     ALPHA < BETA -> favor recall (catch more, risk over-prediction)  [current]
-# The target is extremely rare-positive (storm-event floods ~0.2% of land cells/day),
-# so a precision-favoring loss (ALPHA>BETA) collapses to predicting all-zero. We
-# favor RECALL (ALPHA<BETA) so the model actually fires on flood cells.
-TVERSKY_ALPHA = 0.3
-TVERSKY_BETA = 0.7
-PRED_THRESHOLD = 0.5     # decision threshold for the binary val metrics (F1/IoU/...)
-
 
 # ---------------------------------------------------------------------------
 # Output grid — generated fresh on every call, never stored. Square CELL_KM

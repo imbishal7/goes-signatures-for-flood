@@ -49,8 +49,8 @@ DEFAULT_TARGET_HOURS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
 TYPICAL_FILE_SIZE_MB = 60.0   # verified: 57–61 MB per file
 
 # default full span; override per run with --start / --end
-DEFAULT_START = date(2026, 6, 1)
-DEFAULT_END = date(2026, 6, 22)
+DEFAULT_START = date(2015, 1, 1)
+DEFAULT_END = date(2018, 12, 30)
 
 # NOTE: downloads default to /mnt/disk4 (overflow). The model pipeline reads GOES
 # from /mnt/disk1/goes-data (config.DATA_DIR) — pass --data-dir to match, or

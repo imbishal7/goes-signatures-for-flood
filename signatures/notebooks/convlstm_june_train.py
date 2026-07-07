@@ -37,17 +37,15 @@ from sklearn.metrics import average_precision_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-# config.py (repo root) is the single source for the output grid (build_grid_cells).
-ROOT = Path(__file__).resolve().parent
-while not (ROOT / "config.py").exists() and ROOT != ROOT.parent:
-    ROOT = ROOT.parent
-sys.path.insert(0, str(ROOT))
-from config import build_grid_cells  # noqa: E402
+# standalone: the output grid lives in signatures/siggrid.py (no repo config.py).
+SIG_ROOT = Path(__file__).resolve().parent.parent          # signatures/
+sys.path.insert(0, str(SIG_ROOT))
+from siggrid import build_grid_cells  # noqa: E402
 
 # ===========================================================================
 # Hyperparameters & settings
 # ===========================================================================
-CACHE_DIR = ROOT / "signatures/cache/convlstm_june"   # shared day-cache
+CACHE_DIR = SIG_ROOT / "cache/convlstm_june"   # shared day-cache
 
 # Which ABI bands to feed, as 1-indexed band numbers (1..16). Default = all 16.
 # e.g. BANDS = (2, 3, 7, 10, 13, 16) for the curated set.

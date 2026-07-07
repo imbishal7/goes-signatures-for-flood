@@ -37,6 +37,7 @@ MODEL_DIR = ROOT / "notebooks" / "model"
 sys.path.insert(0, str(MODEL_DIR))
 OUT_DIR = MODEL_DIR / "outputs"
 from gridindex import build_pix2cell  # noqa: E402
+from foldsplit import fold_splits, fold_suffix  # noqa: E402
 
 from config import CACHE_DIR  # noqa: E402
 
@@ -52,7 +53,7 @@ GRID_R, GRID_C = 59, 95
 SEQ_LOG = (16, 17)    # log1p these seq channels (glm_count, glm_density)
 SUM_LOG = (5, 6)      # log1p these sum channels (glm_daily_count, glm_max_3h)
 
-EPOCHS = 50
+EPOCHS = int(os.environ.get("EPOCHS", 50))
 BATCH_SIZE = 16       # per GPU (small batch -> more optimizer steps)
 WORKERS = 8
 LR = 3e-4
@@ -65,7 +66,7 @@ LOSS_CSI_W = 0.3
 LOSS_TOL_W = 0.1
 DROPOUT = 0.2
 WEIGHT_DECAY = 1e-2
-PATIENCE = 10
+PATIENCE = int(os.environ.get("PATIENCE", 10))
 SEED = 0
 
 
@@ -231,19 +232,13 @@ class FeatureCache(Dataset):
 
 
 def load_splits():
-    """Train/val/test day lists, filtered to days whose _sum.npy exists on disk."""
-    m = pd.read_parquet(CACHE_DIR / "manifest.parquet")
-
-    def days(s):
-        ds = [d.strftime("%Y%m%d") for d in m.loc[m.split == s, "label_day"]]
-        return [d for d in ds if (CACHE_DIR / f"{d}_sum.npy").exists()]
-
-    return days("train"), days("val"), days("test")
+    """Train/val/test day lists for the current CV fold (see foldsplit.py)."""
+    return fold_splits(CACHE_DIR)
 
 
 def load_or_compute_stats(days, land):
     """Train-only per-channel mean/std (log1p GLM) over land; cached to disk."""
-    fp = CACHE_DIR / "feat_stats.npz"
+    fp = CACHE_DIR / f"feat_stats{fold_suffix()}.npz"
     if fp.exists():
         z = np.load(fp)
         return z["seq_mean"], z["seq_std"], z["sum_mean"], z["sum_std"]
@@ -406,7 +401,7 @@ def main():
                               sampler=sampler, num_workers=WORKERS, drop_last=False)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    ckpt = OUT_DIR / f"{NAME}.pt"
+    ckpt = OUT_DIR / f"{NAME}{fold_suffix()}.pt"
     hist = []
     best_val, best_epoch, no_improve = -1.0, 0, 0
     t_train0 = time.perf_counter()
@@ -458,7 +453,7 @@ def main():
             break
 
     if is_main:
-        np.savez(OUT_DIR / f"{NAME}_results.npz", hist=np.array(hist, np.float32))
+        np.savez(OUT_DIR / f"{NAME}{fold_suffix()}_results.npz", hist=np.array(hist, np.float32))
         net.load_state_dict(torch.load(ckpt))
         vm = evaluate_full(net, va_days, land, dev, threshold=None)
         tm = evaluate_full(net, te_days, land, dev, threshold=vm["thr"])  # final test

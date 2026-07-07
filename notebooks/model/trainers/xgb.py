@@ -23,6 +23,7 @@ MODEL_DIR = ROOT / "notebooks" / "model"
 sys.path.insert(0, str(MODEL_DIR))
 OUT_DIR = MODEL_DIR / "outputs"
 from gridindex import build_pix2cell  # noqa: E402
+from foldsplit import fold_splits, fold_suffix  # noqa: E402
 
 from config import CACHE_DIR  # noqa: E402
 
@@ -34,13 +35,8 @@ POS_WEIGHT = 30.0
 
 
 def load_splits():
-    m = pd.read_parquet(CACHE_DIR / "manifest.parquet")
-
-    def days(s):
-        ds = [d.strftime("%Y%m%d") for d in m.loc[m.split == s, "label_day"]]
-        return [d for d in ds if (CACHE_DIR / f"{d}_sum.npy").exists()]
-
-    return days("train"), days("val"), days("test")
+    """Train/val/test day lists for the current CV fold (see foldsplit.py)."""
+    return fold_splits(CACHE_DIR)
 
 
 def build_xy(days, land):
@@ -150,10 +146,10 @@ def main():
     model = fit_model(Xtr, Ytr, Xva, Yva, POS_WEIGHT)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(OUT_DIR / f"{NAME}.pkl", "wb") as f:
+    with open(OUT_DIR / f"{NAME}{fold_suffix()}.pkl", "wb") as f:
         pickle.dump({"model": model, "kind": NAME, "n_feat": N_FEAT,
                      "spw": POS_WEIGHT}, f)
-    print(f"[{NAME}] saved -> {OUT_DIR / (NAME + '.pkl')}", flush=True)
+    print(f"[{NAME}] saved -> {OUT_DIR / (NAME + fold_suffix() + '.pkl')}", flush=True)
 
     vm = _metrics(*predict_grids({"model": model}, va, land), land, threshold=None)
     tm = _metrics(*predict_grids({"model": model}, te, land), land, threshold=vm["thr"])
