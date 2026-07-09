@@ -26,7 +26,7 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from floodlens.config import CACHE_DIR, OUT_DIR  # noqa: E402
+from floodlens.config import CACHE_DIR, model_artifact  # noqa: E402
 from floodlens.foldsplit import fold_splits, fold_suffix  # noqa: E402
 from floodlens.gridindex import build_pix2cell  # noqa: E402
 
@@ -42,7 +42,7 @@ GRID_R, GRID_C = 59, 95
 SEQ_LOG = (16, 17)    # log1p these seq channels (glm_count, glm_density)
 SUM_LOG = (5, 6)      # log1p these sum channels (glm_daily_count, glm_max_3h)
 
-EPOCHS = int(os.environ.get("EPOCHS", 50))
+EPOCHS = int(os.environ.get("EPOCHS", 30))
 BATCH_SIZE = 16       # per GPU (small batch -> more optimizer steps)
 WORKERS = 8
 LR = 3e-4
@@ -389,8 +389,7 @@ def main():
     train_loader = DataLoader(tr_ds, batch_size=BATCH_SIZE, shuffle=(sampler is None),
                               sampler=sampler, num_workers=WORKERS, drop_last=False)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    ckpt = OUT_DIR / f"{NAME}{fold_suffix()}.pt"
+    ckpt = model_artifact(NAME, fold_suffix(), "pt")
     hist = []
     best_val, best_epoch, no_improve = -1.0, 0, 0
     t_train0 = time.perf_counter()
@@ -442,7 +441,8 @@ def main():
             break
 
     if is_main:
-        np.savez(OUT_DIR / f"{NAME}{fold_suffix()}_results.npz", hist=np.array(hist, np.float32))
+        np.savez(model_artifact(NAME, f"{fold_suffix()}_results", "npz"),
+                 hist=np.array(hist, np.float32))
         net.load_state_dict(torch.load(ckpt))
         vm = evaluate_full(net, va_days, land, dev, threshold=None)
         tm = evaluate_full(net, te_days, land, dev, threshold=vm["thr"])  # final test

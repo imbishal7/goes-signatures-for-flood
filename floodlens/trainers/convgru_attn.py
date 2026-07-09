@@ -26,7 +26,7 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from floodlens.config import CACHE_DIR, OUT_DIR  # noqa: E402
+from floodlens.config import CACHE_DIR, model_artifact  # noqa: E402
 from floodlens.foldsplit import fold_splits, fold_suffix  # noqa: E402
 from floodlens.gridindex import build_pix2cell  # noqa: E402
 
@@ -42,20 +42,20 @@ GRID_R, GRID_C = 59, 95
 SEQ_LOG = (16, 17)    # log1p these seq channels (glm_count, glm_density)
 SUM_LOG = (5, 6)      # log1p these sum channels (glm_daily_count, glm_max_3h)
 
-EPOCHS = int(os.environ.get("EPOCHS", 100))
+EPOCHS = int(os.environ.get("EPOCHS", 30))
 BATCH_SIZE = 10      # per GPU (small batch -> more optimizer steps)
 WORKERS = 8
 LR = 3e-4
 MIN_LR = 1e-5
-WARMUP_EPOCHS = 10 #3
+WARMUP_EPOCHS = 3
 GAMMA = 2.0
-POS_WEIGHT = 50.0 #30
-LOSS_FOCAL_W = 0.7 #.6
-LOSS_CSI_W = 0.25 #.3
-LOSS_TOL_W = 0.05 #.1
+POS_WEIGHT = 30.0
+LOSS_FOCAL_W = 0.6
+LOSS_CSI_W = 0.3
+LOSS_TOL_W = 0.1
 DROPOUT = 0.2
 WEIGHT_DECAY = 1e-2
-PATIENCE = int(os.environ.get("PATIENCE", 50))
+PATIENCE = int(os.environ.get("PATIENCE", 10))
 SEED = 0
 
 
@@ -409,8 +409,7 @@ def main():
     train_loader = DataLoader(tr_ds, batch_size=BATCH_SIZE, shuffle=(sampler is None),
                               sampler=sampler, num_workers=WORKERS, drop_last=False)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    ckpt = OUT_DIR / f"{NAME}{fold_suffix()}.pt"
+    ckpt = model_artifact(NAME, fold_suffix(), "pt")
     hist = []
     best_val, best_epoch, no_improve = -1.0, 0, 0
     t_train0 = time.perf_counter()
@@ -462,7 +461,8 @@ def main():
             break
 
     if is_main:
-        np.savez(OUT_DIR / f"{NAME}{fold_suffix()}_results.npz", hist=np.array(hist, np.float32))
+        np.savez(model_artifact(NAME, f"{fold_suffix()}_results", "npz"),
+                 hist=np.array(hist, np.float32))
         net.load_state_dict(torch.load(ckpt))
         vm = evaluate_full(net, va_days, land, dev, threshold=None)
         tm = evaluate_full(net, te_days, land, dev, threshold=vm["thr"])  # final test

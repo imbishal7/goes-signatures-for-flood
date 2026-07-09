@@ -12,7 +12,7 @@ import time
 import numpy as np
 from sklearn.metrics import average_precision_score, precision_recall_curve
 
-from floodlens.config import CACHE_DIR, OUT_DIR  # noqa: E402
+from floodlens.config import CACHE_DIR, model_artifact  # noqa: E402
 from floodlens.foldsplit import fold_splits, fold_suffix  # noqa: E402
 from floodlens.gridindex import build_pix2cell  # noqa: E402
 
@@ -134,11 +134,11 @@ def main():
 
     model = fit_model(Xtr, Ytr, Xva, Yva, POS_WEIGHT)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(OUT_DIR / f"{NAME}{fold_suffix()}.pkl", "wb") as f:
+    out = model_artifact(NAME, fold_suffix(), "pkl")
+    with open(out, "wb") as f:
         pickle.dump({"model": model, "kind": NAME, "n_feat": N_FEAT,
                      "spw": POS_WEIGHT}, f)
-    print(f"[{NAME}] saved -> {OUT_DIR / (NAME + fold_suffix() + '.pkl')}", flush=True)
+    print(f"[{NAME}] saved -> {out}", flush=True)
 
     vm = _metrics(*predict_grids({"model": model}, va, land), land, threshold=None)
     tm = _metrics(*predict_grids({"model": model}, te, land), land, threshold=vm["thr"])

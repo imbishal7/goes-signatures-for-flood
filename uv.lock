@@ -1143,7 +1143,7 @@ wheels = [
 [[package]]
 name = "goes-signatures-flood"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "cupy-cuda12x" },

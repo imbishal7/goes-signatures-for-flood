@@ -64,6 +64,23 @@ CELL_KM = 50
 CACHE_DIR = ROOT / "cache" / "goes_grid50_2019_2026"   # project NVMe (fast reads)
 OUT_DIR = ROOT / "outputs"                             # model checkpoints + results (gitignored)
 
+
+def model_artifact(name: str, suffix: str = "", ext: str = "pt",
+                   make: bool = True) -> Path:
+    """Per-model artifact path ``OUT_DIR/<name>/<name><suffix>.<ext>``.
+
+    Every checkpoint / results file for a model lives in its own
+    ``OUT_DIR/<name>/`` subdir so folds don't clutter a flat directory. The
+    trainers (write), ``run_cv`` (skip/resume check), and the eval notebooks
+    (read) all route through this one helper so the layout can't drift.
+    ``make=True`` creates the subdir (writers); pass ``make=False`` for pure
+    existence checks so readers don't create empty dirs.
+    """
+    d = OUT_DIR / name
+    if make:
+        d.mkdir(parents=True, exist_ok=True)
+    return d / f"{name}{suffix}.{ext}"
+
 # ---------------------------------------------------------------------------
 # Output grid — generated fresh on every call, never stored. Square CELL_KM
 # cells laid over CONUS land in equal-area; a pure function of CELL_KM + the

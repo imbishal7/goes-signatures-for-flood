@@ -1,8 +1,9 @@
 """Drive the blocked K-fold CV sweep: train every model on every fold.
 
 Deep models train across both GPUs (DDP via torchrun, nproc=2); tabular models
-run single-process. Each (model, fold) writes fold-keyed artifacts to outputs/
-(``<name>_f<k>.pt`` / ``.pkl`` + deep ``<name>_f<k>_results.npz``), so the run is
+run single-process. Each (model, fold) writes fold-keyed artifacts to its own
+per-model subdir ``outputs/<name>/`` (``<name>_f<k>.pt`` / ``.pkl`` + deep
+``<name>_f<k>_results.npz``, via ``config.model_artifact``), so the run is
 **resumable** — an existing artifact is skipped unless ``--force``. Fold splits
 and the leakage-safe per-fold normalization stats come from floodlens.foldsplit.
 
@@ -18,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from floodlens.config import OUT_DIR
+from floodlens.config import model_artifact
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent                    # repo root — run trainers as -m floodlens.trainers.*
@@ -30,7 +31,7 @@ ALL = DEEP + TAB
 
 def artifact(model: str, fold: int) -> Path:
     ext = "pt" if model in DEEP else "pkl"
-    return OUT_DIR / f"{model}_f{fold}.{ext}"
+    return model_artifact(model, f"_f{fold}", ext, make=False)
 
 
 def main() -> int:
