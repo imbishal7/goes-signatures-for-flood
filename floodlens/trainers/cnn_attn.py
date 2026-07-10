@@ -4,7 +4,7 @@ Per-frame 2D CNN + temporal attention.
 Pure per-cell signatures (no image, no climatology). Inputs: seq (B,8,19,59,95),
 daily summaries (B,8,59,95), lead (B,8); output per-cell flood logits (B,1,59,95).
 Features are normalized (train-only: log1p on GLM, then standardize) inside the model;
-lead time is added as a per-frame channel. Loss = 0.6 focal + 0.3 soft-CSI + 0.1
+lead time is added as a per-frame channel. Loss = 0.7 focal + 0.25 soft-CSI + 0.05
 spatial-tolerance. Train across both GPUs:
 
     cd notebooks/model
@@ -42,17 +42,17 @@ GRID_R, GRID_C = 59, 95
 SEQ_LOG = (16, 17)    # log1p these seq channels (glm_count, glm_density)
 SUM_LOG = (5, 6)      # log1p these sum channels (glm_daily_count, glm_max_3h)
 
-EPOCHS = int(os.environ.get("EPOCHS", 30))
+EPOCHS = int(os.environ.get("EPOCHS", 50))
 BATCH_SIZE = 16       # per GPU (small batch -> more optimizer steps)
 WORKERS = 8
 LR = 3e-4
 MIN_LR = 1e-5
 WARMUP_EPOCHS = 3
 GAMMA = 2.0
-POS_WEIGHT = 30.0
-LOSS_FOCAL_W = 0.6
-LOSS_CSI_W = 0.3
-LOSS_TOL_W = 0.1
+POS_WEIGHT = 50.0
+LOSS_FOCAL_W = 0.7
+LOSS_CSI_W = 0.25
+LOSS_TOL_W = 0.05
 DROPOUT = 0.2
 WEIGHT_DECAY = 1e-2
 PATIENCE = int(os.environ.get("PATIENCE", 10))
@@ -154,7 +154,7 @@ class FloodNet(nn.Module):
 
 
 # ===========================================================================
-# Loss = 0.6 focal + 0.3 soft-CSI + 0.1 spatial-tolerance  (over land cells)
+# Loss = 0.7 focal + 0.25 soft-CSI + 0.05 spatial-tolerance  (over land cells)
 # ===========================================================================
 def _weighted_focal_bce(logits, y, pos_weight, gamma=2.0):
     logits = logits.float()

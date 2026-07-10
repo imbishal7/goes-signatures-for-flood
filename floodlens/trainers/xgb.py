@@ -20,7 +20,7 @@ NAME = "xgb"
 N_SEQ, N_SUM, T_FRAMES = 19, 8, 8
 GRID_R, GRID_C = 59, 95
 N_FEAT = T_FRAMES * N_SEQ + N_SUM + T_FRAMES   # 168
-POS_WEIGHT = 30.0
+POS_WEIGHT = 50.0
 
 
 def load_splits():
