@@ -24,7 +24,7 @@ from floodlens.config import model_artifact
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent                    # repo root — run trainers as -m floodlens.trainers.*
 
-DEEP = ["resnet3d", "cnn_attn", "convgru_attn", "convgru_attn_tversky"]
+DEEP = ["resnet3d", "cnn_attn", "convgru_attn"]
 TAB = ["xgb"]
 ALL = DEEP + TAB
 

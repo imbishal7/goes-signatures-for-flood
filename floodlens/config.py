@@ -15,10 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
-# Storage — large data/artifacts live on /mnt/disk1 (see CLAUDE.md)
+# Storage — large data/artifacts live on /mnt/disk4 (see CLAUDE.md)
 # ---------------------------------------------------------------------------
 DATA_DIR = Path("/mnt/disk4/goes-data")          # GOES ABI NetCDFs (full-day 3-hourly)
-GLM_DIR = Path("/mnt/disk1/glm-data")            # GLM lightning parquet/day
+GLM_DIR = Path("/mnt/disk4/glm-data")            # GLM lightning parquet/day
 STATES_GEOJSON = DATA_DIR / "aux/us-states.geojson"       # CONUS land boundary
 UNIFIED_PARQUET = ROOT / "data/flood_warnings/floods_unified.parquet"
 

@@ -52,9 +52,9 @@ TYPICAL_FILE_SIZE_MB = 60.0   # verified: 57–61 MB per file
 DEFAULT_START = date(2015, 1, 1)
 DEFAULT_END = date(2018, 12, 30)
 
-# NOTE: downloads default to /mnt/disk4 (overflow). The model pipeline reads GOES
-# from /mnt/disk1/goes-data (config.DATA_DIR) — pass --data-dir to match, or
-# move/symlink, so the notebooks find what you pull here.
+# NOTE: this default (/mnt/disk4/recent-goes) is the recent/StormArthur pull. The
+# model pipeline reads GOES from /mnt/disk4/goes-data (config.DATA_DIR) — pass
+# --data-dir to match, or move/symlink, so the notebooks find what you pull here.
 DEFAULT_DATA_DIR = Path("/mnt/disk4/recent-goes")
 DEFAULT_WORKERS = 25           # saturates 100 MB/s with ~60 MB files
 

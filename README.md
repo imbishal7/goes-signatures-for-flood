@@ -1,13 +1,25 @@
 # GOES Signatures for Flood Prediction
 
 A research project that uses **GOES satellite imagery** and **GLM lightning data**
-to predict **hazardous flooding conditions across the United States** on a
-**50 × 50 km grid**.
+to predict **which areas of the contiguous US (CONUS) will flood the next day**, on
+a **50 × 50 km grid**.
 
-From a day's GOES + GLM observations, the model predicts **which grid cells face
-hazardous flooding the next day** over the contiguous US (CONUS). Ground truth
-comes from three flood layers (detailed below): news-report extents
-(**groundsource**), NWS flood **warnings**, and NCEI **storm events**.
+**At a glance:**
+
+- **Training range:** **2019–2025** (all 7 years; the model is trained and evaluated
+  with blocked K-fold cross-validation across the full span). 2026 is held out of
+  training — its labels are still truncated.
+- **Inputs:** one full day of **GOES ABI** imagery (8 frames/day, 5 emissive-IR
+  bands) **+ GLM lightning**, downscaled from the raw ~1500 × 2500 pixel frame to a
+  **50 × 50 km CONUS-land grid** of per-cell features (see *Downscaling* below).
+- **Output:** a per-cell flood probability for the **next day** — which 50 km cells
+  face flooding on CDT day **D** given day **D−1**'s observations.
+- **Labels (ground truth):** *observed* floods = news-report extents
+  (**groundsource**) ∪ NCEI **storm events**. NWS flood **warnings** are held out as
+  a separate operational baseline to benchmark against, not used as a label.
+- **Result:** the model finds real flood signal a day ahead and is **largely
+  complementary** to same-day NWS warnings — together they cover more observed floods
+  than either alone (see *Model vs. NWS warnings* below).
 
 ## Project Structure
 
@@ -17,7 +29,7 @@ goes-signatures-for-flood/
 │   ├── raw/                # groundsource flood-extent parquet (downloaded, gitignored)
 │   ├── flood_warnings/     # floods_unified.parquet (committed) + build intermediates
 │   └── storm_events/       # storm_events_flood.parquet (NCEI observed flood reports)
-│                           # GOES imagery (NetCDF) downloads to /mnt/disk1/goes-data/
+│                           # GOES imagery (NetCDF) lives on /mnt/disk4/goes-data/
 ├── floodlens/                      # importable package (editable-installed via pyproject)
 │   ├── config.py                   # shared constants (paths, bands, grid, cache/outputs)
 │   ├── gridindex.py                # GOES-pixel -> 50 km-cell index (shared)
@@ -133,7 +145,7 @@ Imagery is downloaded from NOAA's public AWS S3 buckets (`noaa-goes16`, `noaa-go
 **Satellite coverage:**
 | Period | Satellite | S3 bucket |
 |---|---|---|
-| 2020-01-01 → 2025-04-06 | GOES-16 | `noaa-goes16` |
+| 2019-01-01 → 2025-04-06 | GOES-16 | `noaa-goes16` |
 | 2025-04-07 → present | GOES-19 | `noaa-goes19` |
 
 **Product:** `ABI-L2-MCMIPC` — multi-band cloud & moisture imagery, CONUS sector, all 16 ABI bands in a single NetCDF file (~60 MB/file).
@@ -144,21 +156,23 @@ Imagery is downloaded from NOAA's public AWS S3 buckets (`noaa-goes16`, `noaa-go
 # 1 image/day (default)
 uv run python -m floodlens.download.goes estimate
 
-# 6 images/day
-uv run python -m floodlens.download.goes estimate --images-per-day 6
+# the model pipeline's cadence: 8 frames/day over the training span
+uv run python -m floodlens.download.goes estimate \
+  --start-date 2019-01-01 --end-date 2025-12-31 --images-per-day 8
 ```
 
-Expected output (2020 – 2026-02-28):
+Expected output for the 8-frame/day pull over the 2019–2025 training span:
 
 ```
-                     GOES-16    GOES-19      Total
-Days with data         1,923        328      2,251
-Files @ 1/day          1,923        328      2,251
-Storage @ 1/day       112.7G      19.2G     131.9G
+GOES Storage Estimate
+Date range  : 2019-01-01 to 2025-12-31 (2557 days)
+File size   : ~60 MB per ABI-L2-MCMIPC file
+Images/day  : 8
 
---- 6 images/day estimate ---
-Files                 11,538      1,968     13,506
-Storage               676.1G     115.3G     791.4G
+                        GOES-16    GOES-19      Total
+Days with data            2,288        269      2,557
+Files                    18,304      2,152     20,456
+Storage                 1072.5G     126.1G    1198.6G
 ```
 
 #### Download
@@ -167,7 +181,7 @@ Storage               676.1G     115.3G     791.4G
 # Dry-run: list every file and report the EXACT total size (no fetching)
 uv run python -m floodlens.download.goes download --dry-run
 
-# Full download — default: 6 daytime images/day (16-21 UTC) -> /mnt/disk1/goes-data
+# Full download — default: all hourly frames -> /mnt/disk4/recent-goes
 uv run python -m floodlens.download.goes download
 
 # Custom date range or hour
@@ -175,11 +189,11 @@ uv run python -m floodlens.download.goes download \
   --start-date 2023-01-01 --end-date 2023-12-31 \
   --workers 32
 
-# 1 image/day, or a custom location (override the 6/day + path defaults)
+# 1 image/day, or a custom location (override the frames + path defaults)
 uv run python -m floodlens.download.goes download --hour 18 --data-dir /some/other/path
 ```
 
-Downloads are resumable — already-downloaded files are skipped automatically. Files are saved to `/mnt/disk1/goes-data/GOES{16|19}/YYYY/MM/DD/` by default (override with `--data-dir`).
+Downloads are resumable — already-downloaded files are skipped automatically. Files are saved to `/mnt/disk4/recent-goes/GOES{16|19}/YYYY/MM/DD/` by default (override with `--data-dir`). The model pipeline reads its 8-frame/day GOES from `/mnt/disk4/goes-data` (`config.DATA_DIR`).
 
 > **Tip:** `--dry-run` reports the **exact** total download size, summed from real S3 object sizes (nothing is fetched). Use it when you need an accurate figure; `estimate` is a faster rough projection at ~60 MB/file.
 
@@ -200,11 +214,34 @@ Downloads are resumable — already-downloaded files are skipped automatically. 
 ## Modeling
 
 **Task (v1).** From a CDT day **D−1** GOES/GLM observation, predict which **50 km
-CONUS-land cells** are **flooded** on day **D**. Labels are *observed* floods —
-groundsource news-report extents ∪ NCEI storm events — on a **59 × 95** grid
-(3,360 land cells). `01_prepare_data.ipynb` materializes a per-cell feature-grid cache
-(`cache/goes_grid50_2019_2026/`): 8 frames/day × 19 per-cell GOES/GLM features, plus
-daily summaries and a lead-time channel.
+CONUS-land cells** are **flooded** on day **D**.
+
+**Training range.** **2019–2025** — the full 7 years, used together via blocked
+K-fold cross-validation (below). **2026 is excluded from training** (its
+groundsource labels stop 2026-01-28 and NCEI storm events lag by months, so its base
+rate is a truncated-label artifact); it is kept only as an extra held-out set for the
+warnings benchmark.
+
+**Inputs (per sample).** One CDT day **D−1** of observations:
+
+- **GOES ABI** — **8 frames/day** (full UTC day, 3-hourly at 00,03,…,21 UTC) so both
+  day and night are covered, using **5 all-emissive-IR bands** (8, 10, 11, 14, 15 —
+  water vapour + cloud-top thermodynamics, readable around the clock).
+- **GLM lightning** — per-day flash counts / density / occurrence.
+- Plus per-cell **daily summaries** and a **lead-time** channel.
+
+**Output (labels).** The target is *observed* floods on day **D** — groundsource
+news-report extents **∪** NCEI storm events — rasterized to the grid as a per-cell
+0/1 map. The model emits a **per-cell flood probability**; NWS warnings are **not**
+used as a label (they are the benchmark, below).
+
+**Downscaling to the 50 × 50 km grid.** Each raw ABI frame is ~**1500 × 2500 pixels**
+(2 km). We project every pixel to CONUS Albers and pool it into a **59 × 95** grid of
+**50 km** equal-area cells (3,360 CONUS-land cells; `gridindex.build_pix2cell` +
+`config.build_grid_cells`). `01_prepare_data.ipynb` materializes the per-cell
+feature-grid cache (`cache/goes_grid50_2019_2026/`): **8 frames/day × 19 per-cell
+GOES/GLM features** + daily summaries + lead time. So the model operates on compact
+per-cell *signatures*, not full-resolution imagery.
 
 **Evaluation — blocked K-fold cross-validation** (`foldsplit.py`). One **fixed
 held-out test set** (~10% of months, interleaved so it spans all of 2019–2025) plus
@@ -233,13 +270,43 @@ Artifacts land in `outputs/` (`<name>_f<k>.pt`/`.pkl` + deep
 the CV metrics table (AUPRC mean ± std + ensemble) and `03_vs_nws_warnings.ipynb` for
 the operational-warning benchmark.
 
+### Model vs. NWS warnings
+
+`03_vs_nws_warnings.ipynb` benchmarks the committed model (the **6-fold ConvGRU+attn
+ensemble**) against the operational forecaster baseline: **NWS Flash-Flood + Areal-Flood
+warnings**. Both are rasterized to the same 50 km grid on the fixed test set and scored
+against the observed-flood labels. Note the lead-time gap — the model predicts day **D**
+from **D−1** imagery (~1-day lead), while warnings are same-day nowcasts — so this is
+*complementary*, not apples-to-apples.
+
+On the fixed test set (271 days, base rate 1.67%):
+
+| predictor | precision | recall | F1 | CSI | AUPRC |
+|---|---|---|---|---|---|
+| ConvGRU+attn (D−1 GOES) | 0.19 | 0.19 | 0.19 | 0.11 | **0.12 (7.2× base)** |
+| NWS warnings (same-day) | 0.46 | 0.28 | 0.35 | 0.21 | — (binary) |
+
+**The model complements NWS warnings.** They catch *different* floods, not the same
+ones — of all observed flooded cell-days on the test set:
+
+- NWS warnings alone: **28.4%**
+- ConvGRU+attn alone: **19.3%**
+- **Model *or* NWS: 39.1%** — the model adds **~11 points** of coverage beyond warnings
+- Model *and* NWS (overlap): only **8.7%**
+
+Day-to-day it cuts both ways: on some days the model beats NWS (e.g. 2023-03-13, CSI
+0.33 vs 0.00) and on others NWS beats the model (e.g. 2024-01-09, 0.17 vs 0.47). A
+day-ahead GOES/GLM signature and a same-day warning are picking up largely
+non-overlapping flood events, so the union covers more than either baseline alone —
+the practical case for the model as an early, complementary screen.
+
 ## Notebooks
 
 Launch with `uv run jupyter lab`.
 
 | Notebook | Description |
 |---|---|
-| [notebooks/explore/flood_data_explore.ipynb](notebooks/explore/flood_data_explore.ipynb) | Load and summarize the flood layers (groundsource extents + NWS FF/FA warnings), build the harmonized `floods_unified.parquet`, and verify warnings against observations (per-warning verification + a 25 km cell-day classification report) |
+| [notebooks/explore/flood_data_explore.ipynb](notebooks/explore/flood_data_explore.ipynb) | Load and summarize the flood layers (groundsource extents + NWS FF/FA warnings), build the harmonized `floods_unified.parquet`, and verify warnings against observations (per-warning verification + a 50 km cell-day classification report) |
 | [notebooks/explore/goes_data_explore.ipynb](notebooks/explore/goes_data_explore.ipynb) | Explore downloaded GOES imagery: disk inventory, pick a date/file, view any band or a true-color RGB, overlay a frame on an interactive folium map, crop to a region |
 | [notebooks/explore/glm_data_explore.ipynb](notebooks/explore/glm_data_explore.ipynb) | Explore GLM lightning flashes: days built so far, flashes/day time series, one day in detail (stats, diurnal cycle, spatial density) |
 | [notebooks/explore/goes_vs_floods.ipynb](notebooks/explore/goes_vs_floods.ipynb) | Watch a day's GOES time-lapse against the next day's floods: reprojected cloud frames + a CONUS land grid + the unified flood layer + synced GLM lightning dots as toggleable overlays on one scroll-zoom map |
